@@ -3,6 +3,7 @@ export type IrrigationMode = 'auto' | 'manual';
 export interface IrrigationStatus {
   soilPercent: number;
   tankPercent: number;
+  tankRaw?: number;
   temperatureC: number | null;
   humidityPercent: number | null;
   pumpOn: boolean;

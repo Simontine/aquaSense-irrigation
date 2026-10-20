@@ -69,8 +69,7 @@ namespace {
 // ============================================================
 
 constexpr uint8_t SOIL_PIN = 34;
-constexpr uint8_t TANK_TRIG_PIN = 23;
-constexpr uint8_t TANK_ECHO_PIN = 18;
+constexpr uint8_t Tank_PIN = 35;
 constexpr uint8_t DHT_PIN = 4;
 constexpr uint8_t PUMP_RELAY_PIN = 26;
 
@@ -90,14 +89,10 @@ constexpr uint8_t DHT_TYPE = DHT11;
 constexpr int SOIL_DRY_RAW = 3200;
 constexpr int SOIL_WET_RAW = 1400;
 
-
-// Tank ultrasonic calibration.
-//
-// Distance when tank is considered empty.
-constexpr float TANK_EMPTY_DISTANCE_CM = 100.0f;
-
-// Distance when tank is considered full.
-constexpr float TANK_FULL_DISTANCE_CM = 8.0f;
+// Calibrate from measured empty/full tank readings; probe polarity can vary.
+// Probe reads 0 when dry and about 2128 when full.
+constexpr int TANK_EMPTY_RAW = 0;
+constexpr int TANK_FULL_RAW = 2128;
 
 // Pump will not run below this tank level.
 constexpr uint8_t TANK_LOW_LIMIT_PERCENT = 18;
@@ -137,6 +132,7 @@ U8G2_SSD1309_128X64_NONAME0_F_HW_I2C display(
 
 float soilPercent = 0.0f;
 float tankPercent = 0.0f;
+int tankRaw = -1;
 
 float temperatureC = NAN;
 float humidityPercent = NAN;
@@ -281,7 +277,7 @@ void updateDisplay() {
 
 
   // ----------------------------------------------------------
-  // Soil / tank display line
+  // Soil and tank display line
   // ----------------------------------------------------------
 
   snprintf(
@@ -478,55 +474,36 @@ void sendJson(
 
 
 // ============================================================
-// TANK ULTRASONIC SENSOR
+// ANALOG SENSOR READINGS
 // ============================================================
 
-float readTankDistanceCm() {
+float readSoilMoisturePercent(uint8_t pin, int dryRaw, int wetRaw) {
+  const int raw = analogRead(pin);
+  if (raw <= 20 || raw >= 4075 || dryRaw == wetRaw) return NAN;
 
-  digitalWrite(
-      TANK_TRIG_PIN,
-      LOW
-  );
+  const float scaled =
+      static_cast<float>(dryRaw - raw) * 100.0f /
+      static_cast<float>(dryRaw - wetRaw);
+  return constrain(scaled, 0.0f, 100.0f);
+}
 
-  delayMicroseconds(3);
-
-  digitalWrite(
-      TANK_TRIG_PIN,
-      HIGH
-  );
-
-  delayMicroseconds(10);
-
-  digitalWrite(
-      TANK_TRIG_PIN,
-      LOW
-  );
-
-
-  const unsigned long duration =
-      pulseIn(
-          TANK_ECHO_PIN,
-          HIGH,
-          25000UL
-      );
-
-
-  // No echo received.
-  if (duration == 0) {
-
+float tankLevelPercentFromRaw(int raw) {
+  if (
+      raw < 0 ||
+      raw >= 4075 ||
+      TANK_EMPTY_RAW < 0 ||
+      TANK_EMPTY_RAW >= 4075 ||
+      TANK_FULL_RAW < 0 ||
+      TANK_FULL_RAW >= 4075 ||
+      TANK_EMPTY_RAW == TANK_FULL_RAW
+  ) {
     return NAN;
   }
 
-
-  // Speed of sound:
-  // 0.0343 cm/us
-  //
-  // Divide by two because the pulse travels
-  // to the water and back.
-
-  return static_cast<float>(duration) *
-         0.0343f /
-         2.0f;
+  const float scaled =
+      static_cast<float>(TANK_EMPTY_RAW - raw) * 100.0f /
+      static_cast<float>(TANK_EMPTY_RAW - TANK_FULL_RAW);
+  return constrain(scaled, 0.0f, 100.0f);
 }
 
 
@@ -537,84 +514,18 @@ float readTankDistanceCm() {
 void updateSensors() {
 
   // ==========================================================
-  // SOIL SENSOR
+  // SOIL AND TANK SENSORS
   // ==========================================================
 
-  const int rawSoil =
-      analogRead(SOIL_PIN);
+  const float nextSoilPercent = readSoilMoisturePercent(SOIL_PIN, SOIL_DRY_RAW, SOIL_WET_RAW);
+  soilValid = !isnan(nextSoilPercent);
+  if (soilValid) soilPercent = nextSoilPercent;
 
-
-  // Basic ADC sanity check.
-  soilValid =
-      rawSoil > 20 &&
-      rawSoil < 4075;
-
-
-  if (soilValid) {
-
-    const float scaled =
-        (
-            static_cast<float>(
-                SOIL_DRY_RAW -
-                rawSoil
-            )
-            *
-            100.0f
-        )
-        /
-        static_cast<float>(
-            SOIL_DRY_RAW -
-            SOIL_WET_RAW
-        );
-
-
-    soilPercent =
-        constrain(
-            scaled,
-            0.0f,
-            100.0f
-        );
-  }
-
-
-  // ==========================================================
-  // TANK SENSOR
-  // ==========================================================
-
-  const float distance =
-      readTankDistanceCm();
-
-
-  tankValid =
-      !isnan(distance) &&
-      distance >= 2.0f &&
-      distance <=
-          TANK_EMPTY_DISTANCE_CM + 10.0f;
-
-
-  if (tankValid) {
-
-    const float scaled =
-        (
-            TANK_EMPTY_DISTANCE_CM -
-            distance
-        )
-        *
-        100.0f
-        /
-        (
-            TANK_EMPTY_DISTANCE_CM -
-            TANK_FULL_DISTANCE_CM
-        );
-
-
-    tankPercent =
-        constrain(
-            scaled,
-            0.0f,
-            100.0f
-        );
-  }
+  const int nextTankRaw = analogRead(Tank_PIN);
+  tankRaw = nextTankRaw >= 0 && nextTankRaw < 4075 ? nextTankRaw : -1;
+  const float nextTankPercent = tankLevelPercentFromRaw(tankRaw);
+  tankValid = !isnan(nextTankPercent);
+  if (tankValid) tankPercent = nextTankPercent;
 
 
   // ==========================================================
@@ -740,10 +651,13 @@ void handleStatus() {
           ? roundf(soilPercent)
           : 0;
 
-
   response["tankPercent"] =
       tankValid
           ? roundf(tankPercent)
+          : 0;
+  response["tankRaw"] =
+      tankRaw >= 0
+          ? tankRaw
           : 0;
 
 
@@ -1141,12 +1055,14 @@ bool publishFirebaseStatus() {
     JsonDocument sensors;
     sensors["soilMoisture"] = soilValid ? roundf(soilPercent) : NAN;
     sensors["tankLevel"] = tankValid ? roundf(tankPercent) : NAN;
+    sensors["tankRaw"] = tankRaw >= 0 ? tankRaw : NAN;
     sensors["temp"] = climateValid ? temperatureC : NAN;
     sensors["humidity"] = climateValid ? humidityPercent : NAN;
 
     JsonDocument status;
     status["soilPercent"] = soilValid ? roundf(soilPercent) : 0;
     status["tankPercent"] = tankValid ? roundf(tankPercent) : 0;
+    status["tankRaw"] = tankRaw >= 0 ? tankRaw : 0;
     status["temperatureC"] = climateValid ? temperatureC : NAN;
     status["humidityPercent"] = climateValid ? humidityPercent : NAN;
     status["pumpOn"] = pumpOn;
@@ -1258,27 +1174,6 @@ void setup() {
 
 
   // ----------------------------------------------------------
-  // ULTRASONIC SENSOR
-  // ----------------------------------------------------------
-
-  pinMode(
-      TANK_TRIG_PIN,
-      OUTPUT
-  );
-
-  pinMode(
-      TANK_ECHO_PIN,
-      INPUT
-  );
-
-
-  digitalWrite(
-      TANK_TRIG_PIN,
-      LOW
-  );
-
-
-  // ----------------------------------------------------------
   // ADC
   // ----------------------------------------------------------
 
@@ -1289,6 +1184,11 @@ void setup() {
 
   analogSetPinAttenuation(
       SOIL_PIN,
+      ADC_11db
+  );
+
+  analogSetPinAttenuation(
+      Tank_PIN,
       ADC_11db
   );
 

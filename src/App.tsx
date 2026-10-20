@@ -72,8 +72,20 @@ function buildAiInsight(input: {
   threshold: number;
   pumpOn: boolean;
   tankLow: boolean;
+  tankUnavailable: boolean;
 }): AiInsight {
-  const { soil, tank, temperature, humidity, environmentAlerts, threshold, pumpOn, tankLow } = input;
+  const { soil, tank, temperature, humidity, environmentAlerts, threshold, pumpOn, tankLow, tankUnavailable } = input;
+
+  if (tankUnavailable) {
+    return {
+      badge: 'Protective',
+      headline: 'Tank-level reading unavailable',
+      summary: 'The tank-level probe is missing or returning an invalid reading, so the firmware is keeping the pump locked off until it can verify the water reserve.',
+      confidence: 95,
+      recommendations: ['Check the tank probe and its empty/full calibration; the pump remains locked until a valid level is reported.'],
+      recommendedThreshold: null,
+    };
+  }
 
   if (environmentAlerts.length > 0) {
     return {
@@ -280,12 +292,14 @@ function App() {
   const firebaseHumidity = percentageValue(property(firebaseSensorData, 'humidity'));
   const controllerSoil = status?.soilValid ? status.soilPercent : null;
   const controllerTank = status?.tankValid ? status.tankPercent : null;
+  const tankRaw = status?.tankRaw ?? numericValue(property(firebaseSensorData, 'tankRaw'));
   const soil = firebaseSoil ?? controllerSoil;
   const soilPercent = firebaseSoil === null ? controllerSoil : firebaseSoil >= 0 && firebaseSoil <= 100 ? firebaseSoil : null;
-  const tank = firebaseTank ?? controllerTank;
+  const tank = status?.tankValid ? firebaseTank ?? controllerTank : null;
   const temperature = firebaseTemperature ?? (status?.climateValid ? status.temperatureC : null);
   const humidity = firebaseHumidity ?? (status?.climateValid ? status.humidityPercent : null);
   const tankLow = tank !== null && tank < 18;
+  const tankUnavailable = connected && tank === null;
   const tankWarning = tank !== null && tank < 20;
   const temperatureOutOfRange = temperature !== null && (temperature < 20 || temperature > 35);
   const temperatureAlertDetail = temperature !== null && temperature < 20
@@ -309,6 +323,7 @@ function App() {
   ];
   const notifications = [
     ...(!connected ? [{ id: 'controller', level: 'warning', title: 'Irrigation device is offline', detail: 'Check the device Wi-Fi connection and Firebase sync to restore live control.' }] : []),
+    ...(tankUnavailable ? [{ id: 'tank-sensor', level: 'warning', title: 'Tank-level reading unavailable', detail: 'The firmware is keeping the pump locked off until the probe reports a valid tank level.' }] : []),
     ...(tankWarning ? [{ id: 'tank', level: tankLow ? 'critical' : 'warning', title: tankLow ? 'Water reserve is too low' : 'Water reserve is low', detail: tankLow ? `Tank level is ${Math.round(tank ?? 0)}%. Refill before running the pump.` : `Tank level is ${Math.round(tank ?? 0)}%, below the 20% reserve alert. Refill soon.` }] : []),
     ...(temperatureOutOfRange ? [{ id: 'temperature', level: 'warning', title: temperature !== null && temperature < 20 ? 'Temperature is below 20°C' : 'Temperature is above 35°C', detail: temperatureAlertDetail }] : []),
     ...(humidityOutOfRange ? [{ id: 'humidity', level: 'warning', title: 'Humidity is outside range', detail: `Humidity is ${Math.round(humidity ?? 0)}%. Expected range: 20–70%.` }] : []),
@@ -340,8 +355,9 @@ function App() {
         threshold,
         pumpOn: Boolean(status?.pumpOn),
         tankLow,
+        tankUnavailable,
       }),
-    [environmentAlerts, humidity, soilPercent, status?.pumpOn, tank, tankLow, temperature, threshold],
+    [environmentAlerts, humidity, soilPercent, status?.pumpOn, tank, tankLow, tankUnavailable, temperature, threshold],
   );
 
   const applyAiThreshold = () => {
@@ -433,7 +449,7 @@ function App() {
             </div>
             <div className={`system-badge ${connected ? 'badge-live' : ''}`}>
               <span className="badge-icon">{connected ? <Check size={16} /> : <CircleAlert size={16} />}</span>
-              <span><strong>{connected ? (status?.pumpOn ? 'Watering now' : 'System ready') : 'No connection'}</strong><small>{connected ? `Irrigation ${status?.mode ?? 'auto'} mode` : 'Check device Wi-Fi and Firebase'}</small></span>
+              <span><strong>{connected ? (status?.pumpOn ? 'Watering now' : tankUnavailable ? 'Pump locked' : 'System ready') : 'No connection'}</strong><small>{connected ? (tankUnavailable ? 'Check tank-level probe' : `Irrigation ${status?.mode ?? 'auto'} mode`) : 'Check device Wi-Fi and Firebase'}</small></span>
             </div>
           </section>
 
@@ -447,7 +463,7 @@ function App() {
             <article className={`metric metric-tank ${tankLow ? 'metric-warning' : ''}`}>
               <div className="metric-heading"><span className="metric-icon"><Droplets size={17} /></span><span>WATER RESERVE</span><span className="live-tick" /></div>
               <div className="metric-value">{reading(tank, '%')}</div>
-              <div className="metric-foot"><span>{tankLow ? 'Refill soon' : tank === null ? 'Awaiting sensor' : 'Tank level'}</span><span>Low at 18%</span></div>
+              <div className="metric-foot"><span>{tankLow ? 'Refill soon' : tank === null ? tankRaw === null || tankRaw === undefined ? 'Sensor check' : `Raw ADC ${Math.round(tankRaw)}` : 'Tank level'}</span><span>{tank === null ? 'Calibrate to unlock' : 'Low at 18%'}</span></div>
               <div className="meter"><span style={{ width: `${tank ?? 0}%` }} /></div>
             </article>
             <article className="metric metric-climate">
@@ -499,8 +515,8 @@ function App() {
                 <button className={(pendingMode ?? status?.mode) === 'manual' ? 'selected' : ''} aria-pressed={(pendingMode ?? status?.mode) === 'manual'} onClick={() => changeMode('manual')}><SlidersHorizontal size={15} /> Manual</button>
               </div>
               <div className="panel-divider" />
-              <div className="pump-row"><div><strong>Water pump</strong><span>{status?.pumpOn ? 'Running' : 'Standby'}{pendingPump !== null ? ' · Awaiting Firebase' : tankLow ? ' · Tank low' : ''}</span></div><button className={`pump-button ${status?.pumpOn ? 'pump-active' : ''}`} onClick={pumpToggle} disabled={busy || pendingPump !== null || !status || (!status.pumpOn && (tankLow || tank === null))} aria-label={status?.pumpOn ? 'Stop pump' : 'Start pump'}><Power size={17} /><span>{status?.pumpOn ? 'Stop' : 'Start'}</span></button></div>
-              {tankLow && <p className="safety-note"><CircleAlert size={14} /> Pump locked until the reservoir is refilled.</p>}
+              <div className="pump-row"><div><strong>Water pump</strong><span>{status?.pumpOn ? 'Running' : 'Standby'}{pendingPump !== null ? ' · Awaiting Firebase' : tankLow ? ' · Tank low' : tankUnavailable ? ' · Tank sensor required' : ''}</span></div><button className={`pump-button ${status?.pumpOn ? 'pump-active' : ''}`} onClick={pumpToggle} disabled={busy || pendingPump !== null || !status || (!status.pumpOn && (tankLow || tank === null))} aria-label={status?.pumpOn ? 'Stop pump' : 'Start pump'}><Power size={17} /><span>{status?.pumpOn ? 'Stop' : 'Start'}</span></button></div>
+              {(tankLow || tankUnavailable) && <p className="safety-note"><CircleAlert size={14} /> {tankUnavailable ? 'Pump locked until the tank probe reports a valid level.' : 'Pump locked until the reservoir is refilled.'}</p>}
             </article>
 
             <article className="control-panel threshold-panel">
