@@ -15,7 +15,7 @@ static const uint16_t DNS_PORT = 53;
 static const unsigned long CONNECT_TIMEOUT_MS = 30000UL;
 static const unsigned long RETRY_INTERVAL_MS = 10000UL;
 
-static const char* AP_SSID = "Smart-Irrigation-Setup";
+static const char* AP_SSID = "AquaSense Setup";
 static const char* AP_PASSWORD = "";
 static const char* AP_IP_TEXT = "192.168.4.1";
 
@@ -29,6 +29,12 @@ static String savedPassword;
 static bool apActive = false;
 static bool serverStarted = false;
 static bool connecting = false;
+// True only for attempts started by entered credentials, so the OLED can
+// show progress without flickering during background retries.
+static bool showProgress = false;
+
+// Called with the SSID and a dot count while a connection attempt is shown.
+static void (*progressCallback)(const String&, unsigned) = nullptr;
 
 static unsigned long connectStartedAt = 0;
 static unsigned long lastRetryAt = 0;
@@ -202,6 +208,7 @@ void configureRoutes() {
     WiFi.begin(savedSSID.c_str(), savedPassword.c_str());
 
     connecting = true;
+    showProgress = true;
     connectStartedAt = millis();
     lastRetryAt = millis();
   });
@@ -227,6 +234,9 @@ void startAP() {
   if (started) {
     Serial.print("[WiFiSetup] Setup AP IP: ");
     Serial.println(WiFi.softAPIP());
+    apActive = true;
+    // Answer every DNS lookup with the AP IP so clients land on the portal.
+    dns.start(DNS_PORT, "*", WiFi.softAPIP());
   } else {
     Serial.println("[WiFiSetup] Failed to start setup AP.");
   }
@@ -256,10 +266,14 @@ void connectSavedCredentials() {
 
   unsigned long startTime = millis();
 
+  unsigned dots = 0;
+  if (progressCallback) progressCallback(savedSSID, dots);
+
   while (WiFi.status() != WL_CONNECTED &&
          millis() - startTime < CONNECT_TIMEOUT_MS) {
     delay(250);
     Serial.print(".");
+    if (progressCallback) progressCallback(savedSSID, ++dots);
   }
 
   Serial.println();
@@ -334,6 +348,12 @@ void begin() {
 }
 
 bool isConnecting() { return connecting; }
+bool isShowingProgress() { return connecting && showProgress; }
+const String& connectingSsid() { return savedSSID; }
+unsigned connectingDots() { return (millis() - connectStartedAt) / 250; }
+void setProgressCallback(void (*callback)(const String&, unsigned)) {
+  progressCallback = callback;
+}
 bool isApActive() { return apActive; }
 
 // --------------------------------------------------
@@ -352,6 +372,7 @@ void handle() {
   if (WiFi.status() == WL_CONNECTED) {
     if (connecting) {
       connecting = false;
+      showProgress = false;
 
       Serial.println("Connected to router.");
       Serial.print("Router IP: ");
@@ -367,6 +388,7 @@ void handle() {
   if (connecting &&
       millis() - connectStartedAt >= CONNECT_TIMEOUT_MS) {
     connecting = false;
+    showProgress = false;
     Serial.println("Router connection timed out.");
 
     if (!apActive) {

@@ -1,419 +1,507 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <ArduinoJson.h>
+#include <HTTPClient.h>
+#include <math.h>
+#include <string.h>
 #include <Wire.h>
-#include <DHT.h>
+#include <WiFiClientSecure.h>
 #include <U8g2lib.h>
+#include <time.h>
+#include <DHT.h>
+#include "firebase.h"
 #include "test.h"
 
-constexpr uint8_t DHT_PIN = 4;
 constexpr uint8_t OLED_SDA_PIN = 21;
 constexpr uint8_t OLED_SCL_PIN = 22;
 
-DHT dht(DHT_PIN, DHT11);
+constexpr uint8_t SOIL_PIN = 34;
+constexpr uint8_t DHT_PIN = 4;
+constexpr uint8_t DHT_TYPE = DHT11;
+constexpr int SOIL_DRY_RAW = 3200;
+constexpr int SOIL_WET_RAW = 1400;
+constexpr unsigned long SENSOR_PUBLISH_INTERVAL_MS = 5000;
+
+DHT dht(DHT_PIN, DHT_TYPE);
+unsigned long lastSensorPublish = 0;
+
 U8G2_SSD1309_128X64_NONAME0_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
 
-float temperature = NAN;
-float humidity = NAN;
-unsigned long lastDHTRead = 0;
+float soilPercent = NAN;
+float tankPercent = NAN;
+float temperatureC = NAN;
+float humidityPercent = NAN;
+bool soilValid = false;
+bool tankValid = false;
+bool climateValid = false;
+bool pumpOn = false;
+String irrigationMode = "--";
+uint64_t updatedAt = 0;
+JsonDocument firebaseSensorData;
+JsonDocument firebaseIrrigationStatus;
+bool sensorDataAvailable = false;
+bool irrigationStatusAvailable = false;
+String sensorDataError = "Waiting for Firebase data";
+String irrigationStatusError = "Waiting for Firebase data";
+bool firebaseTimeSyncRequested = false;
+unsigned long lastFirebaseRead = 0;
 unsigned long lastOledDraw = 0;
 
-// Separate server for the welcome page.
-// Uses port 8080 so it does not conflict with test.h's port 80.
-WebServer welcomeServer(8080);
+bool readFiniteNumber(JsonVariantConst value, float& result) {
+  if (value.isNull() || !value.is<float>()) {
+    return false;
+  }
 
-const char WELCOME_PAGE[] PROGMEM = R"HTML(
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#123d2b">
-  <title>Smart Irrigation | Welcome</title>
-  <style>
-    * { box-sizing: border-box; }
+  const float parsed = value.as<float>();
+  if (!isfinite(parsed)) {
+    return false;
+  }
 
-    body {
-      margin: 0;
-      font-family: Arial, Helvetica, sans-serif;
-      color: #172b24;
-      background: #eef3f0;
-    }
-
-    header {
-      padding: 55px 22px 75px;
-      color: white;
-      background: linear-gradient(135deg, #123d2b, #16764a);
-    }
-
-    .container {
-      max-width: 960px;
-      margin: auto;
-    }
-
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      font-weight: bold;
-      letter-spacing: 1px;
-      text-transform: uppercase;
-    }
-
-    .logo {
-      padding: 12px;
-      border-radius: 14px;
-      background: #ffffff20;
-      font-size: 25px;
-    }
-
-    h1 {
-      margin: 38px 0 12px;
-      font-size: clamp(34px, 7vw, 54px);
-    }
-
-    header p {
-      max-width: 620px;
-      color: #d4e9dc;
-      line-height: 1.7;
-    }
-
-    .status {
-      display: inline-block;
-      margin-top: 18px;
-      padding: 11px 16px;
-      border: 1px solid #ffffff40;
-      border-radius: 30px;
-      background: #ffffff12;
-      font-size: 14px;
-    }
-
-    main {
-      padding: 0 20px 40px;
-    }
-
-    .panel {
-      position: relative;
-      margin-top: -35px;
-      padding: 28px;
-      border: 1px solid #e0e9e3;
-      border-radius: 20px;
-      background: white;
-      box-shadow: 0 12px 35px #123d2b12;
-    }
-
-    .panel > p {
-      color: #64746b;
-      line-height: 1.7;
-    }
-
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 18px;
-      margin-top: 25px;
-    }
-
-    .card {
-      padding: 22px;
-      border: 1px solid #e0e9e3;
-      border-radius: 16px;
-      background: #fbfdfb;
-    }
-
-    .icon {
-      margin-bottom: 15px;
-      font-size: 28px;
-    }
-
-    .card h3 {
-      margin: 0 0 10px;
-    }
-
-    .card p {
-      color: #64746b;
-      font-size: 14px;
-      line-height: 1.7;
-    }
-
-    .network {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 18px;
-      margin-top: 25px;
-      padding: 18px;
-      border-radius: 12px;
-      background: #eef7f0;
-    }
-
-    .network small {
-      display: block;
-      margin-bottom: 7px;
-      color: #64746b;
-    }
-
-    .network strong {
-      overflow-wrap: anywhere;
-      color: #145b39;
-    }
-
-    footer {
-      padding: 0 20px 30px;
-      color: #7a8980;
-      text-align: center;
-      font-size: 12px;
-    }
-  </style>
-</head>
-
-<body>
-  <header>
-    <div class="container">
-      <div class="brand">
-        <div class="logo">&#127807;</div>
-        <span>Smart Irrigation</span>
-      </div>
-
-      <h1>You're connected.</h1>
-
-      <p>
-        Welcome to your Smart Irrigation controller.
-        Your ESP32 has successfully connected to your Wi-Fi
-        network and is ready for your smart irrigation project.
-      </p>
-
-      <div class="status">&#10003; Wi-Fi connection established</div>
-    </div>
-  </header>
-
-  <main>
-    <div class="container">
-      <section class="panel">
-        <h2>Welcome to your control centre</h2>
-        <p>
-          Your controller is online on your local network.
-          This page confirms connectivity. Sensor readings and
-          pump controls can be integrated as the project develops.
-        </p>
-
-        <div class="grid">
-          <div class="card">
-            <div class="icon">&#128225;</div>
-            <h3>Network connected</h3>
-            <p>Your ESP32 has joined your configured Wi-Fi router.</p>
-          </div>
-
-          <div class="card">
-            <div class="icon">&#127793;</div>
-            <h3>Smart irrigation</h3>
-            <p>Ready for soil moisture, tank level and pump monitoring.</p>
-          </div>
-
-          <div class="card">
-            <div class="icon">&#128274;</div>
-            <h3>Local access</h3>
-            <p>Open this page from a device connected to the same router.</p>
-          </div>
-        </div>
-
-        <div class="network">
-          <div>
-            <small>Wi-Fi network</small>
-            <strong id="ssid">Loading...</strong>
-          </div>
-          <div>
-            <small>Controller IP address</small>
-            <strong id="ip">Loading...</strong>
-          </div>
-        </div>
-      </section>
-    </div>
-  </main>
-
-  <footer>
-    Smart Irrigation Controller &bull; ESP32 Local Web Interface
-  </footer>
-
-  <script>
-    fetch('/api/status')
-      .then(response => response.json())
-      .then(data => {
-        document.getElementById('ssid').textContent = data.ssid || 'Connected';
-        document.getElementById('ip').textContent = data.ip || location.hostname;
-      })
-      .catch(() => {
-        document.getElementById('ip').textContent = location.hostname;
-      });
-  </script>
-</body>
-</html>
-)HTML";
-
-void configureWelcomeServer() {
-  welcomeServer.on("/", HTTP_GET, []() {
-    welcomeServer.sendHeader("Cache-Control", "no-store");
-    welcomeServer.send_P(200, "text/html", WELCOME_PAGE);
-  });
-
-  welcomeServer.on("/api/status", HTTP_GET, []() {
-    if (WiFi.status() != WL_CONNECTED) {
-      welcomeServer.send(
-        503,
-        "application/json",
-        "{\"connected\":false}"
-      );
-      return;
-    }
-
-    String json = "{\"connected\":true,\"ssid\":\"";
-    json += WiFi.SSID();
-    json += "\",\"ip\":\"";
-    json += WiFi.localIP().toString();
-    json += "\"}";
-
-    welcomeServer.sendHeader("Cache-Control", "no-store");
-    welcomeServer.send(200, "application/json", json);
-  });
-
-  welcomeServer.onNotFound([]() {
-    welcomeServer.send(404, "text/plain", "Page not found");
-  });
+  result = parsed;
+  return true;
 }
 
-bool welcomeServerStarted = false;
+String firebaseUrl(const char* path) {
+  String url = FIREBASE_DATABASE_URL;
+  while (url.endsWith("/")) {
+    url.remove(url.length() - 1);
+  }
+  url += path;
+  url += ".json";
+
+  if (strlen(FIREBASE_AUTH_TOKEN) > 0) {
+    url += "?auth=";
+    url += FIREBASE_AUTH_TOKEN;
+  }
+  return url;
+}
+
+bool fetchFirebaseRecord(const char* path, JsonDocument& destination, String& error) {
+  if (WiFi.status() != WL_CONNECTED || strlen(FIREBASE_ROOT_CA) == 0) {
+    destination.clear();
+    error = WiFi.status() != WL_CONNECTED
+      ? "Wi-Fi disconnected"
+      : "Firebase root certificate is not configured";
+    return false;
+  }
+
+  WiFiClientSecure client;
+  client.setCACert(FIREBASE_ROOT_CA);
+
+  HTTPClient request;
+  request.setTimeout(3000);
+  if (!request.begin(client, firebaseUrl(path))) {
+    destination.clear();
+    error = "Could not start Firebase request";
+    return false;
+  }
+
+  const int responseCode = request.GET();
+  if (responseCode < 200 || responseCode >= 300) {
+    String message = "Firebase request failed";
+    if (responseCode >= 0) {
+      message = "Firebase returned HTTP ";
+      message += responseCode;
+    } else {
+      message = request.errorToString(responseCode);
+    }
+    request.end();
+    destination.clear();
+    error = message;
+    Serial.printf("Firebase request failed at %s: %s\n", path, error.c_str());
+    return false;
+  }
+
+  const String responseBody = request.getString();
+  request.end();
+
+  JsonDocument fetched;
+  const DeserializationError parseError = deserializeJson(fetched, responseBody);
+  if (parseError || !fetched.is<JsonObject>()) {
+    destination.clear();
+    error = "Firebase data is missing or invalid";
+    Serial.printf("Firebase data at %s is missing or invalid\n", path);
+    return false;
+  }
+  destination.set(fetched.as<JsonVariantConst>());
+  error = "";
+  return true;
+}
+
+bool patchFirebase(const char* path, const String& body) {
+  if (WiFi.status() != WL_CONNECTED || strlen(FIREBASE_ROOT_CA) == 0) {
+    return false;
+  }
+
+  WiFiClientSecure client;
+  client.setCACert(FIREBASE_ROOT_CA);
+
+  HTTPClient request;
+  request.setTimeout(3000);
+  if (!request.begin(client, firebaseUrl(path))) {
+    return false;
+  }
+
+  const int code = request.PATCH(body);
+  if (code < 0) {
+    Serial.printf("Firebase PATCH failed at %s: %s\n", path, request.errorToString(code).c_str());
+  } else if (code >= 400) {
+    Serial.printf("Firebase PATCH returned HTTP %d at %s\n", code, path);
+  }
+  request.end();
+  return code >= 200 && code < 300;
+}
+
+float readSoilMoisturePercent() {
+  const int raw = analogRead(SOIL_PIN);
+  if (raw <= 20 || raw >= 4075 || SOIL_DRY_RAW == SOIL_WET_RAW) {
+    return NAN;
+  }
+
+  const float percent =
+    static_cast<float>(SOIL_DRY_RAW - raw) * 100.0f /
+    static_cast<float>(SOIL_DRY_RAW - SOIL_WET_RAW);
+  return constrain(percent, 0.0f, 100.0f);
+}
+
+// Reads local sensors and writes their values to the paths the dashboard reads.
+void publishSensorReadings() {
+  if (time(nullptr) < 1700000000) {
+    return;
+  }
+
+  soilPercent = readSoilMoisturePercent();
+  soilValid = isfinite(soilPercent);
+
+  const float t = dht.readTemperature();
+  const float h = dht.readHumidity();
+  const bool ok = !isnan(t) && !isnan(h);
+
+  JsonDocument sensors;
+  JsonDocument status;
+  sensors["soilMoisture"] = soilValid ? roundf(soilPercent) : NAN;
+  status["soilPercent"] = soilValid ? roundf(soilPercent) : 0;
+  status["soilValid"] = soilValid;
+  if (ok) {
+    sensors["temp"] = t;
+    sensors["humidity"] = h;
+    status["temperatureC"] = t;
+    status["humidityPercent"] = h;
+  } else {
+    Serial.println("DHT read failed - check wiring on GPIO4 and pull-up");
+  }
+  status["climateValid"] = ok;
+  status["updatedAt"] = static_cast<uint64_t>(time(nullptr)) * 1000;
+
+  String statusBody;
+  serializeJson(status, statusBody);
+  String sensorBody;
+  serializeJson(sensors, sensorBody);
+  const bool sensorsSent = patchFirebase("/sensorData", sensorBody);
+  const bool sent = patchFirebase("/irrigation/status", statusBody);
+  if (!sensorsSent) {
+    Serial.println("Firebase sensorData publish failed");
+  }
+  if (!sent) {
+    Serial.println("Firebase irrigation/status publish failed");
+  }
+  Serial.printf(
+    "Sensor publish %s (soil %s, DHT %s)\n",
+    sensorsSent && sent ? "ok" : "failed",
+    soilValid ? "valid" : "invalid",
+    ok ? "valid" : "invalid"
+  );
+}
+
+bool firstNumber(JsonVariantConst first, JsonVariantConst second,
+                 JsonVariantConst third, float& result) {
+  return readFiniteNumber(first, result) ||
+         readFiniteNumber(second, result) ||
+         readFiniteNumber(third, result);
+}
+
+bool flagOrTrue(JsonVariantConst value) {
+  return !value.is<bool>() || value.as<bool>();
+}
+
+// Shows every numeric value Firebase holds; the *Valid flags report whether
+// the firmware considered the sensor reading trustworthy.
+void updateDisplayedValues() {
+  JsonVariantConst status = firebaseIrrigationStatus.as<JsonVariantConst>();
+  JsonVariantConst sensors = firebaseSensorData.as<JsonVariantConst>();
+  JsonVariantConst none;
+
+  soilPercent = NAN;
+  tankPercent = NAN;
+  temperatureC = NAN;
+  humidityPercent = NAN;
+  firstNumber(status["soilPercent"], sensors["soilMoisture"], none, soilPercent);
+  firstNumber(status["tankPercent"], sensors["tankLevel"], none, tankPercent);
+  firstNumber(status["temperatureC"], status["temperature"], sensors["temp"], temperatureC);
+  firstNumber(status["humidityPercent"], status["humidity"], sensors["humidity"], humidityPercent);
+
+  soilValid = flagOrTrue(status["soilValid"]);
+  tankValid = flagOrTrue(status["tankValid"]);
+  climateValid = flagOrTrue(status["climateValid"]);
+  pumpOn = status["pumpOn"].is<bool>() && status["pumpOn"].as<bool>();
+
+  const char* mode = status["mode"] | "";
+  irrigationMode = mode[0] != '\0' ? mode : "--";
+  updatedAt = status["updatedAt"].is<uint64_t>()
+    ? status["updatedAt"].as<uint64_t>()
+    : 0;
+}
+
+bool refreshFirebaseData() {
+  if (WiFi.status() != WL_CONNECTED) {
+    sensorDataAvailable = false;
+    irrigationStatusAvailable = false;
+    sensorDataError = "Wi-Fi disconnected";
+    irrigationStatusError = "Wi-Fi disconnected";
+    firebaseSensorData.clear();
+    firebaseIrrigationStatus.clear();
+    updateDisplayedValues();
+    return false;
+  }
+
+  if (time(nullptr) < 1700000000) {
+    if (!firebaseTimeSyncRequested) {
+      configTime(0, 0, "pool.ntp.org", "time.google.com");
+      firebaseTimeSyncRequested = true;
+    }
+    sensorDataAvailable = false;
+    irrigationStatusAvailable = false;
+    sensorDataError = "Waiting for device time synchronization";
+    irrigationStatusError = sensorDataError;
+    firebaseSensorData.clear();
+    firebaseIrrigationStatus.clear();
+    updateDisplayedValues();
+    return false;
+  }
+
+  sensorDataAvailable = fetchFirebaseRecord(
+    "/sensorData",
+    firebaseSensorData,
+    sensorDataError
+  );
+  irrigationStatusAvailable = fetchFirebaseRecord(
+    "/irrigation/status",
+    firebaseIrrigationStatus,
+    irrigationStatusError
+  );
+  updateDisplayedValues();
+  return sensorDataAvailable || irrigationStatusAvailable;
+}
+
+enum class Screen { Hotspot, Connecting, Connected, Dashboard };
+Screen screen = Screen::Hotspot;
+unsigned long connectedShownAt = 0;
+
+void drawWelcome() {
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_helvB12_tf);
+  oled.drawStr(24, 28, "Welcome");
+  oled.setFont(u8g2_font_6x10_tf);
+  oled.drawStr(4, 48, "AquaSense Irrigation");
+  oled.sendBuffer();
+}
+
+void drawHotspotInfo(const char* ssid, const String& ip) {
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x10_tf);
+  oled.drawStr(4, 10, "Connect to hotspot:");
+  oled.drawHLine(0, 14, 128);
+  oled.drawStr(4, 28, ssid);
+  oled.drawStr(4, 44, "Portal IP:");
+  oled.drawStr(4, 58, ip.c_str());
+  oled.sendBuffer();
+}
+
+// 6x10 font fits 21 characters per 128 px line.
+void drawConnecting(const String& ssid, unsigned dots) {
+  constexpr unsigned kCharsPerLine = 21;
+  String name = ssid.substring(0, kCharsPerLine);
+  String progress;
+  const unsigned count = dots % (kCharsPerLine * 2 + 1);
+  for (unsigned i = 0; i < count; ++i) progress += '.';
+
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x10_tf);
+  oled.drawStr(0, 10, "Connecting to:");
+  oled.drawHLine(0, 14, 128);
+  oled.drawStr(0, 28, name.c_str());
+  oled.drawStr(0, 44, progress.substring(0, kCharsPerLine).c_str());
+  if (progress.length() > kCharsPerLine) {
+    oled.drawStr(0, 58, progress.substring(kCharsPerLine).c_str());
+  }
+  oled.sendBuffer();
+}
+
+void drawWifiConnected() {
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_helvB12_tf);
+  oled.drawStr(34, 28, "WiFi");
+  oled.drawStr(14, 46, "Connected");
+  oled.sendBuffer();
+}
 
 void setup() {
   Serial.begin(115200);
   delay(300);
 
   Serial.println();
-  Serial.println("Starting Smart Irrigation...");
+  Serial.println("Starting AquaSense Irrigation...");
 
-  // Start your existing Wi-Fi provisioning system.
-  WiFiSetup::begin();
-
-  configureWelcomeServer();
-
+  analogReadResolution(12);
+  analogSetPinAttenuation(SOIL_PIN, ADC_11db);
   dht.begin();
   Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
   oled.begin();
   oled.setContrast(180);
+
+  drawWelcome();
+  delay(10000);
+
+  // Shows the hotspot screen while the AP starts.
+  drawHotspotInfo("Starting...", "--");
+
+  // Start your existing Wi-Fi provisioning system.
+  WiFiSetup::setProgressCallback(drawConnecting);
+  WiFiSetup::begin();
 }
 
 void updateOled() {
-  static int x = 5;
-  static int direction = 1;
-
-  // Read DHT11 every 2 seconds
-  if (millis() - lastDHTRead >= 2000 || lastDHTRead == 0) {
-    lastDHTRead = millis();
-
-    float newHumidity = dht.readHumidity();
-    float newTemperature = dht.readTemperature();
-
-    if (!isnan(newHumidity) && !isnan(newTemperature)) {
-      humidity = newHumidity;
-      temperature = newTemperature;
-
-      Serial.print("Temperature: ");
-      Serial.print(temperature, 1);
-      Serial.print(" C | Humidity: ");
-      Serial.print(humidity, 1);
-      Serial.println(" %");
-    } else {
-      Serial.println("DHT11 read failed. Check wiring.");
-    }
-  }
-
   if (millis() - lastOledDraw < 40) {
     return;
   }
   lastOledDraw = millis();
 
   const bool connected = WiFi.status() == WL_CONNECTED;
-  const char* wifiText = connected ? "Connected"
-                         : WiFiSetup::isConnecting() ? "Connecting..."
-                         : WiFiSetup::isApActive() ? "Setup mode"
-                                                   : "Disconnected";
-  String ipText = connected ? WiFi.localIP().toString()
-                  : WiFiSetup::isApActive() ? WiFi.softAPIP().toString()
-                                            : String("--");
+
+  if (!connected && WiFiSetup::isShowingProgress()) {
+    screen = Screen::Connecting;
+  } else if (screen == Screen::Connecting && !connected) {
+    screen = Screen::Hotspot;
+  }
+
+  if ((screen == Screen::Hotspot || screen == Screen::Connecting) && connected) {
+    screen = Screen::Connected;
+    connectedShownAt = millis();
+  } else if (screen == Screen::Connected &&
+             millis() - connectedShownAt >= 3000) {
+    screen = Screen::Dashboard;
+  } else if (screen == Screen::Dashboard && !connected &&
+             WiFiSetup::isApActive()) {
+    screen = Screen::Hotspot;
+  }
+
+  if (screen == Screen::Hotspot) {
+    drawHotspotInfo("AquaSense Setup", WiFi.softAPIP().toString());
+    return;
+  }
+  if (screen == Screen::Connecting) {
+    drawConnecting(WiFiSetup::connectingSsid(), WiFiSetup::connectingDots());
+    return;
+  }
+  if (screen == Screen::Connected) {
+    drawWifiConnected();
+    return;
+  }
 
   char line[32];
+  char soilValue[8];
+  char tankValue[8];
 
   oled.clearBuffer();
 
-  // Wi-Fi status and IP address
   oled.setFont(u8g2_font_6x10_tf);
-  snprintf(line, sizeof(line), "WiFi: %s", wifiText);
-  oled.drawStr(4, 10, line);
-  snprintf(line, sizeof(line), "IP: %s", ipText.c_str());
-  oled.drawStr(4, 22, line);
-  oled.drawHLine(4, 26, 120);
+  oled.drawStr(4, 10, "AquaSense Irrigation");
+  oled.drawHLine(0, 14, 128);
 
-  // Temperature
-  oled.drawStr(5, 37, "TEMPERATURE");
-  oled.setFont(u8g2_font_helvB12_tf);
-  if (isnan(temperature)) {
-    oled.drawStr(5, 54, "--.- C");
+  // Row 1: temperature and humidity
+  oled.setFont(u8g2_font_5x7_tf);
+  oled.drawStr(4, 24, "TEMP");
+  oled.drawStr(55, 24, "HUMI");
+  oled.setFont(u8g2_font_7x14B_tf);
+  if (isnan(temperatureC)) {
+    oled.drawStr(4, 38, "--.-C");
   } else {
-    snprintf(line, sizeof(line), "%.1f C", temperature);
-    oled.drawStr(5, 54, line);
+    snprintf(line, sizeof(line), "%.1fC", temperatureC);
+    oled.drawStr(4, 38, line);
+  }
+  if (isnan(humidityPercent)) {
+    oled.drawStr(55, 38, "--%");
+  } else {
+    snprintf(line, sizeof(line), "%.0f%%", humidityPercent);
+    oled.drawStr(55, 38, line);
   }
 
-  // Humidity
-  oled.setFont(u8g2_font_6x10_tf);
-  oled.drawStr(85, 37, "HUMIDITY");
-  oled.setFont(u8g2_font_helvB12_tf);
-  if (isnan(humidity)) {
-    oled.drawStr(85, 54, "--%");
+  // Row 2: sensor readings from Firebase.
+  oled.setFont(u8g2_font_5x7_tf);
+  oled.drawStr(4, 49, "SOIL");
+  oled.drawStr(55, 49, "TANK");
+  oled.setFont(u8g2_font_7x14B_tf);
+  if (isnan(soilPercent)) {
+    snprintf(soilValue, sizeof(soilValue), "--%%");
   } else {
-    snprintf(line, sizeof(line), "%.0f%%", humidity);
-    oled.drawStr(85, 54, line);
+    snprintf(soilValue, sizeof(soilValue), "%.0f%%", soilPercent);
   }
+  if (isnan(tankPercent)) {
+    snprintf(tankValue, sizeof(tankValue), "--%%");
+  } else {
+    snprintf(tankValue, sizeof(tankValue), "%.0f%%", tankPercent);
+  }
+  oled.drawStr(4, 63, soilValue);
+  oled.drawStr(55, 63, tankValue);
 
-  // Animated progress bar
-  oled.drawFrame(3, 58, 122, 6);
-  oled.drawBox(x, 60, 12, 2);
+  oled.setFont(u8g2_font_5x7_tf);
+  oled.drawStr(90, 24, "Status");
+  oled.drawStr(90, 49, "PUMP");
+  oled.setFont(u8g2_font_7x14B_tf);
+  char modeLabel[6];
+  if (irrigationMode == "manual") {
+    snprintf(modeLabel, sizeof(modeLabel), "MAN");
+  } else {
+    snprintf(modeLabel, sizeof(modeLabel), "%.4s", irrigationMode.c_str());
+    for (char* c = modeLabel; *c; ++c) *c = toupper(*c);
+  }
+  oled.drawStr(90, 38, modeLabel);
+  oled.drawStr(90, 63, irrigationStatusAvailable ? (pumpOn ? "ON" : "OFF") : "--");
 
   oled.sendBuffer();
-
-  x += direction * 3;
-  if (x >= 110) {
-    x = 110;
-    direction = -1;
-  }
-  if (x <= 5) {
-    x = 5;
-    direction = 1;
-  }
 }
+
 
 void loop() {
   // Preserve the existing Wi-Fi provisioning and connection handling.
   WiFiSetup::handle();
 
-  // Start the welcome server only after router Wi-Fi connects.
-  if (WiFi.status() == WL_CONNECTED && !welcomeServerStarted) {
-    welcomeServer.begin();
-    welcomeServerStarted = true;
-
-    Serial.println();
-    Serial.println("==================================");
-    Serial.println(" SMART IRRIGATION ONLINE");
-    Serial.print(" Wi-Fi: ");
-    Serial.println(WiFi.SSID());
-    Serial.print(" Welcome page: http://");
-    Serial.print(WiFi.localIP());
-    Serial.println(":8080/");
-    Serial.println("==================================");
+  if (WiFi.status() == WL_CONNECTED &&
+      millis() - lastSensorPublish >= SENSOR_PUBLISH_INTERVAL_MS) {
+    lastSensorPublish = millis();
+    publishSensorReadings();
   }
 
-  if (welcomeServerStarted) {
-    welcomeServer.handleClient();
+  if (WiFi.status() == WL_CONNECTED &&
+      (lastFirebaseRead == 0 || millis() - lastFirebaseRead >= 5000)) {
+    lastFirebaseRead = millis();
+    refreshFirebaseData();
+  } else if (WiFi.status() != WL_CONNECTED) {
+    if (sensorDataAvailable || irrigationStatusAvailable ||
+        sensorDataError != "Wi-Fi disconnected" ||
+        irrigationStatusError != "Wi-Fi disconnected") {
+      sensorDataAvailable = false;
+      irrigationStatusAvailable = false;
+      sensorDataError = "Wi-Fi disconnected";
+      irrigationStatusError = sensorDataError;
+      firebaseSensorData.clear();
+      firebaseIrrigationStatus.clear();
+      updateDisplayedValues();
+    }
+    firebaseTimeSyncRequested = false;
   }
 
-    updateOled();
-
+  updateOled();
   delay(2);
 }
