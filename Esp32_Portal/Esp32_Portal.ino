@@ -17,50 +17,42 @@ constexpr uint8_t OLED_SDA_PIN = 21;
 constexpr uint8_t OLED_SCL_PIN = 22;
 
 constexpr uint8_t SOIL_PIN = 34;
+constexpr uint8_t TANK_PIN = 35;
 constexpr uint8_t DHT_PIN = 4;
+constexpr uint8_t PUMP_RELAY_PIN = 26;
 constexpr uint8_t DHT_TYPE = DHT11;
 constexpr int SOIL_DRY_RAW = 3200;
 constexpr int SOIL_WET_RAW = 1400;
-constexpr unsigned long SENSOR_PUBLISH_INTERVAL_MS = 5000;
+constexpr int TANK_EMPTY_RAW = 0;
+constexpr int TANK_FULL_RAW = 2128;
+constexpr uint8_t TANK_LOW_LIMIT_PERCENT = 18;
+constexpr uint8_t DEFAULT_MOISTURE_THRESHOLD = 38;
+constexpr unsigned long SENSOR_INTERVAL_MS = 2200;
+constexpr unsigned long FIREBASE_STATUS_INTERVAL_MS = 5000;
+constexpr unsigned long FIREBASE_COMMAND_INTERVAL_MS = 2000;
+constexpr uint64_t COMMAND_MAX_AGE_MS = 30000;
 
 DHT dht(DHT_PIN, DHT_TYPE);
-unsigned long lastSensorPublish = 0;
 
 U8G2_SSD1309_128X64_NONAME0_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
 
 float soilPercent = NAN;
 float tankPercent = NAN;
+int tankRaw = -1;
 float temperatureC = NAN;
 float humidityPercent = NAN;
 bool soilValid = false;
 bool tankValid = false;
 bool climateValid = false;
 bool pumpOn = false;
-String irrigationMode = "--";
-uint64_t updatedAt = 0;
-JsonDocument firebaseSensorData;
-JsonDocument firebaseIrrigationStatus;
-bool sensorDataAvailable = false;
-bool irrigationStatusAvailable = false;
-String sensorDataError = "Waiting for Firebase data";
-String irrigationStatusError = "Waiting for Firebase data";
-bool firebaseTimeSyncRequested = false;
-unsigned long lastFirebaseRead = 0;
+String irrigationMode = "auto";
+uint8_t moistureThreshold = DEFAULT_MOISTURE_THRESHOLD;
+unsigned long lastSensorRead = 0;
+unsigned long lastFirebaseStatus = 0;
+unsigned long lastFirebaseCommand = 0;
+String lastFirebaseCommandId;
+bool timeConfigured = false;
 unsigned long lastOledDraw = 0;
-
-bool readFiniteNumber(JsonVariantConst value, float& result) {
-  if (value.isNull() || !value.is<float>()) {
-    return false;
-  }
-
-  const float parsed = value.as<float>();
-  if (!isfinite(parsed)) {
-    return false;
-  }
-
-  result = parsed;
-  return true;
-}
 
 String firebaseUrl(const char* path) {
   String url = FIREBASE_DATABASE_URL;
@@ -77,59 +69,8 @@ String firebaseUrl(const char* path) {
   return url;
 }
 
-bool fetchFirebaseRecord(const char* path, JsonDocument& destination, String& error) {
-  if (WiFi.status() != WL_CONNECTED || strlen(FIREBASE_ROOT_CA) == 0) {
-    destination.clear();
-    error = WiFi.status() != WL_CONNECTED
-      ? "Wi-Fi disconnected"
-      : "Firebase root certificate is not configured";
-    return false;
-  }
-
-  WiFiClientSecure client;
-  client.setCACert(FIREBASE_ROOT_CA);
-
-  HTTPClient request;
-  request.setTimeout(3000);
-  if (!request.begin(client, firebaseUrl(path))) {
-    destination.clear();
-    error = "Could not start Firebase request";
-    return false;
-  }
-
-  const int responseCode = request.GET();
-  if (responseCode < 200 || responseCode >= 300) {
-    String message = "Firebase request failed";
-    if (responseCode >= 0) {
-      message = "Firebase returned HTTP ";
-      message += responseCode;
-    } else {
-      message = request.errorToString(responseCode);
-    }
-    request.end();
-    destination.clear();
-    error = message;
-    Serial.printf("Firebase request failed at %s: %s\n", path, error.c_str());
-    return false;
-  }
-
-  const String responseBody = request.getString();
-  request.end();
-
-  JsonDocument fetched;
-  const DeserializationError parseError = deserializeJson(fetched, responseBody);
-  if (parseError || !fetched.is<JsonObject>()) {
-    destination.clear();
-    error = "Firebase data is missing or invalid";
-    Serial.printf("Firebase data at %s is missing or invalid\n", path);
-    return false;
-  }
-  destination.set(fetched.as<JsonVariantConst>());
-  error = "";
-  return true;
-}
-
-bool patchFirebase(const char* path, const String& body) {
+bool firebaseRequest(const char* method, const char* path, const String& body,
+                     String* responseBody = nullptr) {
   if (WiFi.status() != WL_CONNECTED || strlen(FIREBASE_ROOT_CA) == 0) {
     return false;
   }
@@ -143,14 +84,26 @@ bool patchFirebase(const char* path, const String& body) {
     return false;
   }
 
-  const int code = request.PATCH(body);
-  if (code < 0) {
-    Serial.printf("Firebase PATCH failed at %s: %s\n", path, request.errorToString(code).c_str());
-  } else if (code >= 400) {
-    Serial.printf("Firebase PATCH returned HTTP %d at %s\n", code, path);
+  int responseCode;
+  if (strcmp(method, "PATCH") == 0) {
+    responseCode = request.PATCH(body);
+  } else if (strcmp(method, "PUT") == 0) {
+    responseCode = request.PUT(body);
+  } else {
+    responseCode = request.GET();
+  }
+
+  if (responseCode < 0) {
+    Serial.printf("Firebase request failed at %s: %s\n",
+                  path, request.errorToString(responseCode).c_str());
+  } else if (responseCode >= 400) {
+    Serial.printf("Firebase returned HTTP %d at %s\n", responseCode, path);
+  }
+  if (responseCode >= 200 && responseCode < 300 && responseBody != nullptr) {
+    *responseBody = request.getString();
   }
   request.end();
-  return code >= 200 && code < 300;
+  return responseCode >= 200 && responseCode < 300;
 }
 
 float readSoilMoisturePercent() {
@@ -165,133 +118,300 @@ float readSoilMoisturePercent() {
   return constrain(percent, 0.0f, 100.0f);
 }
 
-// Reads local sensors and writes their values to the paths the dashboard reads.
-void publishSensorReadings() {
-  if (time(nullptr) < 1700000000) {
-    return;
+float tankLevelPercentFromRaw(int raw) {
+  if (raw < 0 || raw >= 4075 ||
+      TANK_EMPTY_RAW < 0 || TANK_EMPTY_RAW >= 4075 ||
+      TANK_FULL_RAW < 0 || TANK_FULL_RAW >= 4075 ||
+      TANK_EMPTY_RAW == TANK_FULL_RAW) {
+    return NAN;
   }
 
-  soilPercent = readSoilMoisturePercent();
-  soilValid = isfinite(soilPercent);
+  const float percent =
+    static_cast<float>(TANK_EMPTY_RAW - raw) * 100.0f /
+    static_cast<float>(TANK_EMPTY_RAW - TANK_FULL_RAW);
+  return constrain(percent, 0.0f, 100.0f);
+}
 
-  const float t = dht.readTemperature();
-  const float h = dht.readHumidity();
-  const bool ok = !isnan(t) && !isnan(h);
+void setPump(bool requested) {
+  if (requested &&
+      (!tankValid || tankPercent < TANK_LOW_LIMIT_PERCENT)) {
+    requested = false;
+  }
+  if (requested && irrigationMode == "auto" && !soilValid) {
+    requested = false;
+  }
 
-  JsonDocument sensors;
-  JsonDocument status;
-  sensors["soilMoisture"] = soilValid ? roundf(soilPercent) : NAN;
-  status["soilPercent"] = soilValid ? roundf(soilPercent) : 0;
-  status["soilValid"] = soilValid;
-  if (ok) {
-    sensors["temp"] = t;
-    sensors["humidity"] = h;
-    status["temperatureC"] = t;
-    status["humidityPercent"] = h;
+  pumpOn = requested;
+  digitalWrite(PUMP_RELAY_PIN, pumpOn ? LOW : HIGH);
+}
+
+void updateSensors() {
+  const float nextSoilPercent = readSoilMoisturePercent();
+  soilValid = !isnan(nextSoilPercent);
+  if (soilValid) {
+    soilPercent = nextSoilPercent;
+  }
+
+  const int nextTankRaw = analogRead(TANK_PIN);
+  tankRaw = nextTankRaw >= 0 && nextTankRaw < 4075 ? nextTankRaw : -1;
+  const float nextTankPercent = tankLevelPercentFromRaw(tankRaw);
+  tankValid = !isnan(nextTankPercent);
+  if (tankValid) {
+    tankPercent = nextTankPercent;
+  }
+
+  const float nextTemperature = dht.readTemperature();
+  const float nextHumidity = dht.readHumidity();
+  climateValid = !isnan(nextTemperature) && !isnan(nextHumidity);
+  if (climateValid) {
+    temperatureC = nextTemperature;
+    humidityPercent = nextHumidity;
   } else {
     Serial.println("DHT read failed - check wiring on GPIO4 and pull-up");
   }
-  status["climateValid"] = ok;
-  status["updatedAt"] = static_cast<uint64_t>(time(nullptr)) * 1000;
 
-  String statusBody;
-  serializeJson(status, statusBody);
+  if (!tankValid || tankPercent < TANK_LOW_LIMIT_PERCENT) {
+    setPump(false);
+  }
+}
+
+void applyAutomation() {
+  if (!tankValid || tankPercent < TANK_LOW_LIMIT_PERCENT) {
+    setPump(false);
+    return;
+  }
+  if (irrigationMode != "auto") {
+    return;
+  }
+  if (!soilValid) {
+    setPump(false);
+    return;
+  }
+  if (!pumpOn && soilPercent < moistureThreshold) {
+    setPump(true);
+  } else if (pumpOn && soilPercent >= moistureThreshold + 5) {
+    setPump(false);
+  }
+}
+
+bool publishFirebaseStatus() {
+  const time_t now = time(nullptr);
+  if (now < 1700000000) {
+    return false;
+  }
+
+  JsonDocument sensors;
+  sensors["soilMoisture"] = soilValid ? roundf(soilPercent) : NAN;
+  sensors["tankLevel"] = tankValid ? roundf(tankPercent) : NAN;
+  sensors["tankRaw"] = tankRaw >= 0 ? tankRaw : NAN;
+  sensors["temp"] = climateValid ? temperatureC : NAN;
+  sensors["humidity"] = climateValid ? humidityPercent : NAN;
+
+  JsonDocument status;
+  status["soilPercent"] = soilValid ? roundf(soilPercent) : 0;
+  status["tankPercent"] = tankValid ? roundf(tankPercent) : 0;
+  status["tankRaw"] = tankRaw >= 0 ? tankRaw : 0;
+  status["temperatureC"] = climateValid ? temperatureC : NAN;
+  status["humidityPercent"] = climateValid ? humidityPercent : NAN;
+  status["pumpOn"] = pumpOn;
+  status["mode"] = irrigationMode;
+  status["moistureThreshold"] = moistureThreshold;
+  status["soilValid"] = soilValid;
+  status["tankValid"] = tankValid;
+  status["climateValid"] = climateValid;
+  status["updatedAt"] = static_cast<uint64_t>(now) * 1000;
+
   String sensorBody;
+  String statusBody;
   serializeJson(sensors, sensorBody);
-  const bool sensorsSent = patchFirebase("/sensorData", sensorBody);
-  const bool sent = patchFirebase("/irrigation/status", statusBody);
-  if (!sensorsSent) {
-    Serial.println("Firebase sensorData publish failed");
-  }
-  if (!sent) {
-    Serial.println("Firebase irrigation/status publish failed");
-  }
-  Serial.printf(
-    "Sensor publish %s (soil %s, DHT %s)\n",
-    sensorsSent && sent ? "ok" : "failed",
-    soilValid ? "valid" : "invalid",
-    ok ? "valid" : "invalid"
-  );
+  serializeJson(status, statusBody);
+  const bool sensorsWritten =
+    firebaseRequest("PATCH", "/sensorData", sensorBody);
+  const bool statusWritten =
+    firebaseRequest("PATCH", "/irrigation/status", statusBody);
+  return sensorsWritten && statusWritten;
 }
 
-bool firstNumber(JsonVariantConst first, JsonVariantConst second,
-                 JsonVariantConst third, float& result) {
-  return readFiniteNumber(first, result) ||
-         readFiniteNumber(second, result) ||
-         readFiniteNumber(third, result);
-}
-
-bool flagOrTrue(JsonVariantConst value) {
-  return !value.is<bool>() || value.as<bool>();
-}
-
-// Shows every numeric value Firebase holds; the *Valid flags report whether
-// the firmware considered the sensor reading trustworthy.
-void updateDisplayedValues() {
-  JsonVariantConst status = firebaseIrrigationStatus.as<JsonVariantConst>();
-  JsonVariantConst sensors = firebaseSensorData.as<JsonVariantConst>();
-  JsonVariantConst none;
-
-  soilPercent = NAN;
-  tankPercent = NAN;
-  temperatureC = NAN;
-  humidityPercent = NAN;
-  firstNumber(status["soilPercent"], sensors["soilMoisture"], none, soilPercent);
-  firstNumber(status["tankPercent"], sensors["tankLevel"], none, tankPercent);
-  firstNumber(status["temperatureC"], status["temperature"], sensors["temp"], temperatureC);
-  firstNumber(status["humidityPercent"], status["humidity"], sensors["humidity"], humidityPercent);
-
-  soilValid = flagOrTrue(status["soilValid"]);
-  tankValid = flagOrTrue(status["tankValid"]);
-  climateValid = flagOrTrue(status["climateValid"]);
-  pumpOn = status["pumpOn"].is<bool>() && status["pumpOn"].as<bool>();
-
-  const char* mode = status["mode"] | "";
-  irrigationMode = mode[0] != '\0' ? mode : "--";
-  updatedAt = status["updatedAt"].is<uint64_t>()
-    ? status["updatedAt"].as<uint64_t>()
-    : 0;
-}
-
-bool refreshFirebaseData() {
-  if (WiFi.status() != WL_CONNECTED) {
-    sensorDataAvailable = false;
-    irrigationStatusAvailable = false;
-    sensorDataError = "Wi-Fi disconnected";
-    irrigationStatusError = "Wi-Fi disconnected";
-    firebaseSensorData.clear();
-    firebaseIrrigationStatus.clear();
-    updateDisplayedValues();
-    return false;
+void pollFirebaseCommand() {
+  const time_t now = time(nullptr);
+  if (now < 1700000000) {
+    return;
   }
 
-  if (time(nullptr) < 1700000000) {
-    if (!firebaseTimeSyncRequested) {
-      configTime(0, 0, "pool.ntp.org", "time.google.com");
-      firebaseTimeSyncRequested = true;
+  String responseBody;
+  if (!firebaseRequest("GET", "/irrigation/command", "", &responseBody)) {
+    return;
+  }
+
+  JsonDocument command;
+  if (deserializeJson(command, responseBody) || !command.is<JsonObject>()) {
+    return;
+  }
+
+  const char* commandId = command["id"] | "";
+  if (commandId[0] == '\0' || lastFirebaseCommandId == commandId) {
+    return;
+  }
+
+  const uint64_t sentAt = command["sentAt"] | 0ULL;
+  const uint64_t nowMs = static_cast<uint64_t>(now) * 1000;
+  if (sentAt == 0 || sentAt > nowMs || nowMs - sentAt > COMMAND_MAX_AGE_MS) {
+    return;
+  }
+  lastFirebaseCommandId = commandId;
+
+  if (command["moistureThreshold"].is<int>()) {
+    moistureThreshold = static_cast<uint8_t>(
+      constrain(command["moistureThreshold"].as<int>(), 15, 75)
+    );
+  }
+
+  const char* requestedMode = command["mode"] | "";
+  if (strcmp(requestedMode, "auto") == 0 ||
+      strcmp(requestedMode, "manual") == 0) {
+    irrigationMode = requestedMode;
+    if (irrigationMode == "auto") {
+      setPump(false);
     }
-    sensorDataAvailable = false;
-    irrigationStatusAvailable = false;
-    sensorDataError = "Waiting for device time synchronization";
-    irrigationStatusError = sensorDataError;
-    firebaseSensorData.clear();
-    firebaseIrrigationStatus.clear();
-    updateDisplayedValues();
-    return false;
   }
 
-  sensorDataAvailable = fetchFirebaseRecord(
-    "/sensorData",
-    firebaseSensorData,
-    sensorDataError
-  );
-  irrigationStatusAvailable = fetchFirebaseRecord(
-    "/irrigation/status",
-    firebaseIrrigationStatus,
-    irrigationStatusError
-  );
-  updateDisplayedValues();
-  return sensorDataAvailable || irrigationStatusAvailable;
+  if (command["pump"].is<bool>()) {
+    const bool requestedPump = command["pump"].as<bool>();
+    if (requestedPump && irrigationMode != "manual") {
+      Serial.println("Firebase pump command rejected: switch to manual mode first");
+    } else if (requestedPump &&
+               (!tankValid || tankPercent < TANK_LOW_LIMIT_PERCENT)) {
+      Serial.println("Firebase pump command rejected: tank is unsafe");
+    } else {
+      setPump(requestedPump);
+    }
+  }
+
+  applyAutomation();
+  if (!publishFirebaseStatus()) {
+    Serial.println("Firebase status publish failed after command");
+  }
+}
+
+void addCorsHeaders() {
+  WiFiSetup::server.sendHeader("Access-Control-Allow-Origin", "*");
+  WiFiSetup::server.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  WiFiSetup::server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  WiFiSetup::server.sendHeader("Cache-Control", "no-store");
+}
+
+void sendJson(int statusCode, JsonDocument& document) {
+  String body;
+  serializeJson(document, body);
+  addCorsHeaders();
+  WiFiSetup::server.send(statusCode, "application/json", body);
+}
+
+void handleLocalStatus() {
+  JsonDocument response;
+  response["soilPercent"] = soilValid ? roundf(soilPercent) : 0;
+  response["tankPercent"] = tankValid ? roundf(tankPercent) : 0;
+  response["tankRaw"] = tankRaw >= 0 ? tankRaw : 0;
+  if (climateValid) {
+    response["temperatureC"] = temperatureC;
+    response["humidityPercent"] = humidityPercent;
+  } else {
+    response["temperatureC"] = nullptr;
+    response["humidityPercent"] = nullptr;
+  }
+  response["pumpOn"] = pumpOn;
+  response["mode"] = irrigationMode;
+  response["moistureThreshold"] = moistureThreshold;
+  response["soilValid"] = soilValid;
+  response["tankValid"] = tankValid;
+  response["climateValid"] = climateValid;
+  response["updatedAt"] = millis();
+  sendJson(200, response);
+}
+
+void handleLocalConfig() {
+  JsonDocument request;
+  if (deserializeJson(request, WiFiSetup::server.arg("plain"))) {
+    JsonDocument response;
+    response["error"] = "Invalid JSON body";
+    sendJson(400, response);
+    return;
+  }
+
+  if (request["moistureThreshold"].is<int>()) {
+    moistureThreshold = static_cast<uint8_t>(
+      constrain(request["moistureThreshold"].as<int>(), 15, 75)
+    );
+  }
+
+  JsonDocument response;
+  response["ok"] = true;
+  response["moistureThreshold"] = moistureThreshold;
+  sendJson(200, response);
+}
+
+void handleLocalControl() {
+  JsonDocument request;
+  if (deserializeJson(request, WiFiSetup::server.arg("plain"))) {
+    JsonDocument response;
+    response["error"] = "Invalid JSON body";
+    sendJson(400, response);
+    return;
+  }
+
+  if (request["mode"].is<const char*>()) {
+    const String requestedMode = request["mode"].as<String>();
+    if (requestedMode != "auto" && requestedMode != "manual") {
+      JsonDocument response;
+      response["error"] = "Mode must be auto or manual";
+      sendJson(400, response);
+      return;
+    }
+    irrigationMode = requestedMode;
+    if (irrigationMode == "auto") {
+      setPump(false);
+    }
+  }
+
+  if (request["pump"].is<bool>()) {
+    if (irrigationMode != "manual") {
+      JsonDocument response;
+      response["error"] = "Switch to manual mode before operating the pump";
+      sendJson(409, response);
+      return;
+    }
+
+    const bool requestedPump = request["pump"].as<bool>();
+    if (requestedPump &&
+        (!tankValid || tankPercent < TANK_LOW_LIMIT_PERCENT)) {
+      JsonDocument response;
+      response["error"] = "Pump blocked: tank reading is invalid or below the safe limit";
+      sendJson(409, response);
+      return;
+    }
+    setPump(requestedPump);
+  }
+
+  applyAutomation();
+  JsonDocument response;
+  response["ok"] = true;
+  response["pumpOn"] = pumpOn;
+  response["mode"] = irrigationMode;
+  sendJson(200, response);
+}
+
+void registerIrrigationRoutes() {
+  WiFiSetup::server.on("/api/status", HTTP_GET, handleLocalStatus);
+  WiFiSetup::server.on("/api/config", HTTP_POST, handleLocalConfig);
+  WiFiSetup::server.on("/api/control", HTTP_POST, handleLocalControl);
+  WiFiSetup::server.on("/api/config", HTTP_OPTIONS, []() {
+    addCorsHeaders();
+    WiFiSetup::server.send(204);
+  });
+  WiFiSetup::server.on("/api/control", HTTP_OPTIONS, []() {
+    addCorsHeaders();
+    WiFiSetup::server.send(204);
+  });
 }
 
 enum class Screen { Hotspot, Connecting, Connected, Dashboard };
@@ -353,8 +473,13 @@ void setup() {
   Serial.println();
   Serial.println("Starting AquaSense Irrigation...");
 
+  pinMode(PUMP_RELAY_PIN, OUTPUT);
+  digitalWrite(PUMP_RELAY_PIN, HIGH);
+  pumpOn = false;
+
   analogReadResolution(12);
   analogSetPinAttenuation(SOIL_PIN, ADC_11db);
+  analogSetPinAttenuation(TANK_PIN, ADC_11db);
   dht.begin();
   Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
   oled.begin();
@@ -368,6 +493,7 @@ void setup() {
 
   // Start your existing Wi-Fi provisioning system.
   WiFiSetup::setProgressCallback(drawConnecting);
+  registerIrrigationRoutes();
   WiFiSetup::begin();
 }
 
@@ -424,30 +550,30 @@ void updateOled() {
   oled.drawStr(4, 24, "TEMP");
   oled.drawStr(55, 24, "HUMI");
   oled.setFont(u8g2_font_7x14B_tf);
-  if (isnan(temperatureC)) {
+  if (!climateValid || isnan(temperatureC)) {
     oled.drawStr(4, 38, "--.-C");
   } else {
     snprintf(line, sizeof(line), "%.1fC", temperatureC);
     oled.drawStr(4, 38, line);
   }
-  if (isnan(humidityPercent)) {
+  if (!climateValid || isnan(humidityPercent)) {
     oled.drawStr(55, 38, "--%");
   } else {
     snprintf(line, sizeof(line), "%.0f%%", humidityPercent);
     oled.drawStr(55, 38, line);
   }
 
-  // Row 2: sensor readings from Firebase.
+  // Row 2: live readings from the local sensors.
   oled.setFont(u8g2_font_5x7_tf);
   oled.drawStr(4, 49, "SOIL");
   oled.drawStr(55, 49, "TANK");
   oled.setFont(u8g2_font_7x14B_tf);
-  if (isnan(soilPercent)) {
+  if (!soilValid || isnan(soilPercent)) {
     snprintf(soilValue, sizeof(soilValue), "--%%");
   } else {
     snprintf(soilValue, sizeof(soilValue), "%.0f%%", soilPercent);
   }
-  if (isnan(tankPercent)) {
+  if (!tankValid || isnan(tankPercent)) {
     snprintf(tankValue, sizeof(tankValue), "--%%");
   } else {
     snprintf(tankValue, sizeof(tankValue), "%.0f%%", tankPercent);
@@ -467,7 +593,7 @@ void updateOled() {
     for (char* c = modeLabel; *c; ++c) *c = toupper(*c);
   }
   oled.drawStr(90, 38, modeLabel);
-  oled.drawStr(90, 63, irrigationStatusAvailable ? (pumpOn ? "ON" : "OFF") : "--");
+  oled.drawStr(90, 63, pumpOn ? "ON" : "OFF");
 
   oled.sendBuffer();
 }
@@ -477,29 +603,29 @@ void loop() {
   // Preserve the existing Wi-Fi provisioning and connection handling.
   WiFiSetup::handle();
 
-  if (WiFi.status() == WL_CONNECTED &&
-      millis() - lastSensorPublish >= SENSOR_PUBLISH_INTERVAL_MS) {
-    lastSensorPublish = millis();
-    publishSensorReadings();
+  if (WiFi.status() == WL_CONNECTED && !timeConfigured) {
+    configTime(0, 0, "pool.ntp.org", "time.google.com");
+    timeConfigured = true;
+  }
+
+  if (millis() - lastSensorRead >= SENSOR_INTERVAL_MS) {
+    lastSensorRead = millis();
+    updateSensors();
+    applyAutomation();
   }
 
   if (WiFi.status() == WL_CONNECTED &&
-      (lastFirebaseRead == 0 || millis() - lastFirebaseRead >= 5000)) {
-    lastFirebaseRead = millis();
-    refreshFirebaseData();
-  } else if (WiFi.status() != WL_CONNECTED) {
-    if (sensorDataAvailable || irrigationStatusAvailable ||
-        sensorDataError != "Wi-Fi disconnected" ||
-        irrigationStatusError != "Wi-Fi disconnected") {
-      sensorDataAvailable = false;
-      irrigationStatusAvailable = false;
-      sensorDataError = "Wi-Fi disconnected";
-      irrigationStatusError = sensorDataError;
-      firebaseSensorData.clear();
-      firebaseIrrigationStatus.clear();
-      updateDisplayedValues();
+      millis() - lastFirebaseCommand >= FIREBASE_COMMAND_INTERVAL_MS) {
+    lastFirebaseCommand = millis();
+    pollFirebaseCommand();
+  }
+
+  if (WiFi.status() == WL_CONNECTED &&
+      millis() - lastFirebaseStatus >= FIREBASE_STATUS_INTERVAL_MS) {
+    lastFirebaseStatus = millis();
+    if (!publishFirebaseStatus() && time(nullptr) >= 1700000000) {
+      Serial.println("Firebase status publish failed");
     }
-    firebaseTimeSyncRequested = false;
   }
 
   updateOled();
