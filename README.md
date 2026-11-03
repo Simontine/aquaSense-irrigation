@@ -85,7 +85,7 @@ npm install
 npm run dev
 ```
 
-Open the Vite URL printed in the terminal. Sensor readings and irrigation status refresh from Firebase every five seconds. Mode, threshold, and pump controls enqueue commands for the ESP32; commands require a fresh device status and are confirmed by the device. Notifications report connection and sensor conditions. The optional adaptive threshold suggestion is rule-based and can be applied from the dashboard. Build and type-check a production bundle with `npm run build`; preview it locally with `npm run preview`.
+Open the Vite URL printed in the terminal. Sensor readings and irrigation status refresh from Firebase every five seconds. Mode, threshold, and pump controls enqueue commands for the ESP32; commands require a fresh device status and are confirmed by the device. Notifications report connection and sensor conditions. The optional adaptive threshold suggestion is rule-based and can be applied from the dashboard. History records sensor samples and pump state changes in the current browser while the dashboard is open, retaining up to seven days; observed pump runtime is accumulated since tracking began. Runtime is not a calibrated estimate of water volume, and history is not synchronized to Firebase or other browsers. Build and type-check a production bundle with `npm run build`; preview it locally with `npm run preview`.
 
 ## Firebase data contract
 

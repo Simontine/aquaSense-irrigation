@@ -1,6 +1,6 @@
 import type { FirebaseValue, IrrigationMode, IrrigationStatus } from '../api';
 
-export type DashboardTab = 'overview' | 'notifications';
+export type DashboardTab = 'overview' | 'notifications' | 'history';
 
 export interface NotificationItem {
   id: string;

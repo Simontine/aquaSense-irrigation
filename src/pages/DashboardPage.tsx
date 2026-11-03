@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { firebaseApi, type FirebaseValue, type IrrigationMode, type IrrigationStatus } from '../api';
 import DashboardShell from '../components/DashboardShell';
+import { loadHistory, recordObservation, saveHistory } from '../history';
+import HistoryPage from './HistoryPage';
 import NotificationsPage from './NotificationsPage';
 import OverviewPage from './OverviewPage';
 import type { AiInsight, DashboardTab, NotificationItem } from '../types/dashboard';
@@ -151,6 +153,9 @@ function DashboardPage({ user, onLogout }: DashboardPageProps) {
   const [firebaseError, setFirebaseError] = useState('');
   const [activeTab, setActiveTab] = useState<DashboardTab>('overview');
   const [dismissedNotifications, setDismissedNotifications] = useState<Set<string>>(() => new Set());
+  const [loadedHistory] = useState(loadHistory);
+  const [history, setHistory] = useState(loadedHistory.history);
+  const [historyError, setHistoryError] = useState<string | null>(loadedHistory.error);
 
   useEffect(() => {
     let alive = true;
@@ -306,6 +311,27 @@ function DashboardPage({ user, onLogout }: DashboardPageProps) {
   const notificationIds = notifications.map((notification) => notification.id).join('|');
 
   useEffect(() => {
+    if (!connected || !status) return;
+    setHistory((previous) => recordObservation(previous, {
+      at: status.updatedAt,
+      connected,
+      pumpOn: status.pumpOn,
+      soilPercent,
+      tankPercent: tank,
+    }));
+  }, [connected, soilPercent, status, tank]);
+
+  useEffect(() => {
+    if (loadedHistory.error && history === loadedHistory.history) return;
+    try {
+      saveHistory(history);
+      setHistoryError(null);
+    } catch (error) {
+      setHistoryError(error instanceof Error ? `History could not be saved: ${error.message}` : 'History could not be saved');
+    }
+  }, [history, loadedHistory]);
+
+  useEffect(() => {
     const activeIds = new Set(notificationIds.split('|').filter(Boolean));
     setDismissedNotifications((dismissed) => {
       const next = new Set([...dismissed].filter((id) => activeIds.has(id)));
@@ -359,6 +385,12 @@ function DashboardPage({ user, onLogout }: DashboardPageProps) {
           visibleNotifications={visibleNotifications}
           attentionCount={attentionCount}
           onDismiss={(id) => setDismissedNotifications((dismissed) => new Set(dismissed).add(id))}
+          onBack={() => setActiveTab('overview')}
+        />
+      ) : activeTab === 'history' ? (
+        <HistoryPage
+          history={history}
+          historyError={historyError}
           onBack={() => setActiveTab('overview')}
         />
       ) : (

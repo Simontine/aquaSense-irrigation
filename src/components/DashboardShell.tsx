@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import {
   Activity,
   Bell,
+  ChartNoAxesCombined,
   LogOut,
   RefreshCw,
   SlidersHorizontal,
@@ -50,7 +51,7 @@ function DashboardShell({
     return () => window.removeEventListener('hashchange', sync);
   }, []);
 
-  const current = activeTab === 'notifications' ? 'notifications' : section;
+  const current = activeTab === 'notifications' || activeTab === 'history' ? activeTab : section;
   const select = (next: 'overview' | 'sensors' | 'controls') => {
     setSection(next);
     onTabChange('overview');
@@ -80,6 +81,17 @@ function DashboardShell({
           <SlidersHorizontal size={19} />
           <span className="rail-label">Controls</span>
         </a>
+        <button
+          className={`rail-link ${activeTab === 'history' ? 'active' : ''}`}
+          type="button"
+          aria-label="History"
+          title="History"
+          aria-current={activeTab === 'history' ? 'page' : undefined}
+          onClick={() => onTabChange('history')}
+        >
+          <ChartNoAxesCombined size={19} />
+          <span className="rail-label">History</span>
+        </button>
         <button
           className={`rail-link notification-link ${activeTab === 'notifications' ? 'active' : ''}`}
           type="button"
