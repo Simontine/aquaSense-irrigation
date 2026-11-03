@@ -202,13 +202,19 @@ function OverviewPage({
         <div className="connection-panel-icon"><Wifi size={17} /></div>
         <div className="connection-info"><strong>Cloud connection</strong><span>ESP32 syncs readings and commands through Firebase Realtime Database</span></div>
       </section>
-      <section className="firebase-panel" aria-label="Firebase data">
-        <div className="firebase-heading">
-          <div><span className="eyebrow">REALTIME DATABASE</span><h2>Firebase view</h2></div>
-          <span>{firebaseStatusLabel}{lastUpdated ? ` · ${lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}` : ''}</span>
-        </div>
+      <details className="firebase-panel">
+        <summary className="firebase-heading">
+          <span className="firebase-heading-copy">
+            <span className="eyebrow">ADVANCED DIAGNOSTICS</span>
+            <strong>Live device data</strong>
+          </span>
+          <span className="firebase-summary-meta">
+            <span>{firebaseStatusLabel}{lastUpdated ? ` · ${lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}` : ''}</span>
+            <span className="firebase-toggle">View data <ChevronRight size={15} /></span>
+          </span>
+        </summary>
         <pre className="firebase-json" aria-live="polite">{JSON.stringify({ 'irrigation/status': status ?? null, sensorData: sensorData ?? null }, null, 2)}</pre>
-      </section>
+      </details>
     </>
   );
 }

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   Activity,
   Bell,
@@ -25,6 +25,11 @@ interface DashboardShellProps {
   children: ReactNode;
 }
 
+function readSection(): 'overview' | 'sensors' | 'controls' {
+  const hash = window.location.hash.replace('#', '');
+  return hash === 'sensors' || hash === 'controls' ? hash : 'overview';
+}
+
 function DashboardShell({
   user,
   connected,
@@ -37,21 +42,43 @@ function DashboardShell({
   onRefresh,
   children,
 }: DashboardShellProps) {
+  const [section, setSection] = useState<'overview' | 'sensors' | 'controls'>(readSection);
+
+  useEffect(() => {
+    const sync = () => setSection(readSection());
+    window.addEventListener('hashchange', sync);
+    return () => window.removeEventListener('hashchange', sync);
+  }, []);
+
+  const current = activeTab === 'notifications' ? 'notifications' : section;
+  const select = (next: 'overview' | 'sensors' | 'controls') => {
+    setSection(next);
+    onTabChange('overview');
+  };
+  const linkProps = (id: 'overview' | 'sensors' | 'controls') => ({
+    className: `rail-link ${current === id ? 'active' : ''}`,
+    'aria-current': current === id ? ('page' as const) : undefined,
+    onClick: () => select(id),
+  });
+
   return (
     <main className="app-shell">
       <aside className="rail" aria-label="Main navigation">
-        <a className="brand-mark" href="#overview" aria-label="aquaSense home" onClick={() => onTabChange('overview')}>
+        <a className="brand-mark" href="#overview" aria-label="aquaSense home" onClick={() => select('overview')}>
           <Sprout size={22} strokeWidth={2.1} />
         </a>
         <div className="rail-rule" />
-        <a className={`rail-link ${activeTab === 'overview' ? 'active' : ''}`} href="#overview" aria-label="Overview" title="Overview" onClick={() => onTabChange('overview')}>
+        <a {...linkProps('overview')} href="#overview" aria-label="Overview" title="Overview">
           <Activity size={19} />
+          <span className="rail-label">Overview</span>
         </a>
-        <a className="rail-link" href="#sensors" aria-label="Sensors" title="Sensors" onClick={() => onTabChange('overview')}>
+        <a {...linkProps('sensors')} href="#sensors" aria-label="Sensors" title="Sensors">
           <Waves size={19} />
+          <span className="rail-label">Sensors</span>
         </a>
-        <a className="rail-link" href="#controls" aria-label="Controls" title="Controls" onClick={() => onTabChange('overview')}>
+        <a {...linkProps('controls')} href="#controls" aria-label="Controls" title="Controls">
           <SlidersHorizontal size={19} />
+          <span className="rail-label">Controls</span>
         </a>
         <button
           className={`rail-link notification-link ${activeTab === 'notifications' ? 'active' : ''}`}
@@ -62,6 +89,7 @@ function DashboardShell({
           onClick={() => onTabChange('notifications')}
         >
           <Bell size={19} />
+          <span className="rail-label">Alerts</span>
           {attentionCount > 0 && <span className="notification-count">{attentionCount > 9 ? '9+' : attentionCount}</span>}
         </button>
         <div className="rail-bottom"><span className={`connection-dot ${connected ? 'online' : ''}`} /></div>
