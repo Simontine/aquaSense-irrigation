@@ -50,9 +50,9 @@ function buildAiInsight(input: {
     return {
       badge: 'Protective',
       headline: 'Tank-level reading unavailable',
-      summary: 'The tank-level probe is missing or returning an invalid reading, so the firmware is keeping the pump locked off until it can verify the water reserve.',
+      summary: 'The ultrasonic tank sensor is missing, uncalibrated, or returning an invalid reading, so the firmware is keeping the pump locked off until it can verify the water reserve.',
       confidence: 95,
-      recommendations: ['Check the tank probe and its empty/full calibration; the pump remains locked until a valid level is reported.'],
+      recommendations: ['Check the ultrasonic sensor wiring and empty/full distance calibration; the pump remains locked until a valid level is reported.'],
       recommendedThreshold: null,
     };
   }
@@ -267,6 +267,7 @@ function DashboardPage({ user, onLogout }: DashboardPageProps) {
   const firebaseHumidity = percentageValue(property(firebaseSensorData, 'humidity'));
   const controllerSoil = status?.soilValid ? status.soilPercent : null;
   const controllerTank = status?.tankValid ? status.tankPercent : null;
+  const tankDistanceCm = numericValue(status?.tankDistanceCm ?? property(firebaseSensorData, 'tankDistanceCm'));
   const tankRaw = status?.tankRaw ?? numericValue(property(firebaseSensorData, 'tankRaw'));
   const soil = firebaseSoil ?? controllerSoil;
   const soilPercent = firebaseSoil === null ? controllerSoil : firebaseSoil >= 0 && firebaseSoil <= 100 ? firebaseSoil : null;
@@ -298,7 +299,7 @@ function DashboardPage({ user, onLogout }: DashboardPageProps) {
   ];
   const notifications: NotificationItem[] = [
     ...(!connected ? [{ id: 'controller', level: 'warning' as const, title: 'Irrigation device is offline', detail: 'Check the device Wi-Fi connection and Firebase sync to restore live control.' }] : []),
-    ...(tankUnavailable ? [{ id: 'tank-sensor', level: 'warning' as const, title: 'Tank-level reading unavailable', detail: 'The firmware is keeping the pump locked off until the probe reports a valid tank level.' }] : []),
+    ...(tankUnavailable ? [{ id: 'tank-sensor', level: 'warning' as const, title: 'Tank-level reading unavailable', detail: 'The firmware is keeping the pump locked off until the ultrasonic sensor reports a calibrated tank level.' }] : []),
     ...(tankWarning ? [{ id: 'tank', level: tankLow ? 'critical' as const : 'warning' as const, title: tankLow ? 'Water reserve is too low' : 'Water reserve is low', detail: tankLow ? `Tank level is ${Math.round(tank ?? 0)}%. Refill before running the pump.` : `Tank level is ${Math.round(tank ?? 0)}%, below the 20% reserve alert. Refill soon.` }] : []),
     ...(temperatureOutOfRange ? [{ id: 'temperature', level: 'warning' as const, title: temperature !== null && temperature < 20 ? 'Temperature is below 20°C' : 'Temperature is above 35°C', detail: temperatureAlertDetail }] : []),
     ...(humidityOutOfRange ? [{ id: 'humidity', level: 'warning' as const, title: 'Humidity is outside range', detail: `Humidity is ${Math.round(humidity ?? 0)}%. Expected range: 20–70%.` }] : []),
@@ -400,6 +401,7 @@ function DashboardPage({ user, onLogout }: DashboardPageProps) {
           soil={soil}
           soilPercent={soilPercent}
           tank={tank}
+          tankDistanceCm={tankDistanceCm}
           tankRaw={tankRaw}
           temperature={temperature}
           humidity={humidity}

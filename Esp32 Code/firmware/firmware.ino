@@ -69,7 +69,8 @@ namespace {
 // ============================================================
 
 constexpr uint8_t SOIL_PIN = 34;
-constexpr uint8_t Tank_PIN = 35;
+constexpr uint8_t TANK_TRIG_PIN = 16;
+constexpr uint8_t TANK_ECHO_PIN = 17;
 constexpr uint8_t DHT_PIN = 4;
 constexpr uint8_t PUMP_RELAY_PIN = 26;
 
@@ -89,10 +90,10 @@ constexpr uint8_t DHT_TYPE = DHT11;
 constexpr int SOIL_DRY_RAW = 3200;
 constexpr int SOIL_WET_RAW = 1400;
 
-// Calibrate from measured empty/full tank readings; probe polarity can vary.
-// Probe reads 0 when dry and about 2128 when full.
-constexpr int TANK_EMPTY_RAW = 0;
-constexpr int TANK_FULL_RAW = 2128;
+// Set these to the sensor-to-water distances measured with the tank empty/full.
+// Zero keeps tank level invalid until the installation is calibrated.
+constexpr float TANK_EMPTY_DISTANCE_CM = 20.0f;
+constexpr float TANK_FULL_DISTANCE_CM = 3.0f;
 
 // Pump will not run below this tank level.
 constexpr uint8_t TANK_LOW_LIMIT_PERCENT = 18;
@@ -132,7 +133,7 @@ U8G2_SSD1309_128X64_NONAME0_F_HW_I2C display(
 
 float soilPercent = 0.0f;
 float tankPercent = 0.0f;
-int tankRaw = -1;
+float tankDistanceCm = NAN;
 
 float temperatureC = NAN;
 float humidityPercent = NAN;
@@ -487,22 +488,33 @@ float readSoilMoisturePercent(uint8_t pin, int dryRaw, int wetRaw) {
   return constrain(scaled, 0.0f, 100.0f);
 }
 
-float tankLevelPercentFromRaw(int raw) {
+float readTankDistanceCm() {
+  digitalWrite(TANK_TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TANK_TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TANK_TRIG_PIN, LOW);
+
+  const unsigned long duration = pulseIn(TANK_ECHO_PIN, HIGH, 30000UL);
+  if (duration == 0) return NAN;
+
+  const float distanceCm = static_cast<float>(duration) * 0.0343f / 2.0f;
+  return distanceCm >= 2.0f && distanceCm <= 400.0f ? distanceCm : NAN;
+}
+
+float tankLevelPercentFromDistance(float distanceCm) {
   if (
-      raw < 0 ||
-      raw >= 4075 ||
-      TANK_EMPTY_RAW < 0 ||
-      TANK_EMPTY_RAW >= 4075 ||
-      TANK_FULL_RAW < 0 ||
-      TANK_FULL_RAW >= 4075 ||
-      TANK_EMPTY_RAW == TANK_FULL_RAW
+      isnan(distanceCm) ||
+      TANK_EMPTY_DISTANCE_CM <= TANK_FULL_DISTANCE_CM ||
+      TANK_EMPTY_DISTANCE_CM > 400.0f ||
+      TANK_FULL_DISTANCE_CM < 2.0f
   ) {
     return NAN;
   }
 
   const float scaled =
-      static_cast<float>(TANK_EMPTY_RAW - raw) * 100.0f /
-      static_cast<float>(TANK_EMPTY_RAW - TANK_FULL_RAW);
+      (TANK_EMPTY_DISTANCE_CM - distanceCm) * 100.0f /
+      (TANK_EMPTY_DISTANCE_CM - TANK_FULL_DISTANCE_CM);
   return constrain(scaled, 0.0f, 100.0f);
 }
 
@@ -521,9 +533,8 @@ void updateSensors() {
   soilValid = !isnan(nextSoilPercent);
   if (soilValid) soilPercent = nextSoilPercent;
 
-  const int nextTankRaw = analogRead(Tank_PIN);
-  tankRaw = nextTankRaw >= 0 && nextTankRaw < 4075 ? nextTankRaw : -1;
-  const float nextTankPercent = tankLevelPercentFromRaw(tankRaw);
+  tankDistanceCm = readTankDistanceCm();
+  const float nextTankPercent = tankLevelPercentFromDistance(tankDistanceCm);
   tankValid = !isnan(nextTankPercent);
   if (tankValid) tankPercent = nextTankPercent;
 
@@ -655,10 +666,11 @@ void handleStatus() {
       tankValid
           ? roundf(tankPercent)
           : 0;
-  response["tankRaw"] =
-      tankRaw >= 0
-          ? tankRaw
-          : 0;
+  if (isnan(tankDistanceCm)) {
+    response["tankDistanceCm"] = nullptr;
+  } else {
+    response["tankDistanceCm"] = tankDistanceCm;
+  }
 
 
   if (climateValid) {
@@ -1055,14 +1067,14 @@ bool publishFirebaseStatus() {
     JsonDocument sensors;
     sensors["soilMoisture"] = soilValid ? roundf(soilPercent) : NAN;
     sensors["tankLevel"] = tankValid ? roundf(tankPercent) : NAN;
-    sensors["tankRaw"] = tankRaw >= 0 ? tankRaw : NAN;
+    sensors["tankDistanceCm"] = isnan(tankDistanceCm) ? NAN : tankDistanceCm;
     sensors["temp"] = climateValid ? temperatureC : NAN;
     sensors["humidity"] = climateValid ? humidityPercent : NAN;
 
     JsonDocument status;
     status["soilPercent"] = soilValid ? roundf(soilPercent) : 0;
     status["tankPercent"] = tankValid ? roundf(tankPercent) : 0;
-    status["tankRaw"] = tankRaw >= 0 ? tankRaw : 0;
+    status["tankDistanceCm"] = isnan(tankDistanceCm) ? NAN : tankDistanceCm;
     status["temperatureC"] = climateValid ? temperatureC : NAN;
     status["humidityPercent"] = climateValid ? humidityPercent : NAN;
     status["pumpOn"] = pumpOn;
@@ -1187,10 +1199,9 @@ void setup() {
       ADC_11db
   );
 
-  analogSetPinAttenuation(
-      Tank_PIN,
-      ADC_11db
-  );
+  pinMode(TANK_TRIG_PIN, OUTPUT);
+  pinMode(TANK_ECHO_PIN, INPUT);
+  digitalWrite(TANK_TRIG_PIN, LOW);
 
 
   // ----------------------------------------------------------

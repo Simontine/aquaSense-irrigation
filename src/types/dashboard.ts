@@ -24,6 +24,7 @@ export interface OverviewPageProps {
   soil: number | null;
   soilPercent: number | null;
   tank: number | null;
+  tankDistanceCm: number | null;
   tankRaw: number | null;
   temperature: number | null;
   humidity: number | null;

@@ -6,7 +6,7 @@ A garden irrigation controller with an ESP32 sensor/pump unit and a React dashbo
 
 - ESP32 DevKit V1 (ESP32-WROOM-32)
 - Capacitive analog soil-moisture sensor
-- Analog moisture probe used as a tank-level sensor, with an output that varies with water height
+- Waterproof ultrasonic distance sensor (for example, JSN-SR04T) mounted above the tank
 - DHT11 temperature/humidity module
 - 2.42-inch SSD1309 128x64 OLED display (I2C)
 - Relay module appropriate for the pump load
@@ -17,7 +17,8 @@ A garden irrigation controller with an ESP32 sensor/pump unit and a React dashbo
 | Signal | ESP32 GPIO | Notes |
 | --- | ---: | --- |
 | Soil sensor analog output | 34 | ADC input-only; power the probe from 3.3 V when supported |
-| Tank-level probe analog output | 35 | ADC input-only; use a moisture probe designed for water contact and calibrate empty/full readings |
+| Ultrasonic sensor TRIG | 16 | Digital output |
+| Ultrasonic sensor ECHO | 17 | Digital input; use a voltage divider/level shifter if the sensor's echo output is 5 V |
 | DHT11 data | 4 | Use a pull-up if the module does not include one |
 | OLED SDA | 21 | SSD1309 I2C interface; use the module's specified supply voltage |
 | OLED SCL | 22 | SSD1309 I2C interface |
@@ -64,17 +65,17 @@ Configure Firebase Realtime Database rules deliberately. The dashboard needs rea
 
 The SSD1309 display shows soil moisture, tank level, air temperature, air humidity, pump state, and irrigation mode. Sensor values display as `--` when the corresponding reading is invalid.
 
-The pump relay starts OFF at boot. In auto mode the pump turns on below the configured moisture threshold and turns off after the soil recovers by 5 percentage points. Pump operation is refused when the tank level is invalid or below 18%, including in manual mode; Firebase commands do not bypass these firmware checks. The portal sketch uses the same relay on GPIO 26 and tank probe on GPIO 35 as the controller sketch. If sensor calibration or relay polarity differs from your hardware, test with the pump disconnected first.
+The pump relay starts OFF at boot. In auto mode the pump turns on below the configured moisture threshold and turns off after the soil recovers by 5 percentage points. Pump operation is refused when the tank level is invalid or below 18%, including in manual mode; Firebase commands do not bypass these firmware checks. The portal sketch uses the same relay and ultrasonic sensor pins as the controller sketch. If sensor calibration or relay polarity differs from your hardware, test with the pump disconnected first.
 
 ### Calibration
 
 Edit the soil calibration constants near the top of `Esp32 Code/firmware/firmware.ino` or `Esp32_Portal/Esp32_Portal.ino`, depending on which ESP32 sketch you use:
 
 - `SOIL_DRY_RAW` and `SOIL_WET_RAW`: record the analog values in dry and well-watered soil; sensor outputs vary substantially.
-- `TANK_EMPTY_RAW` and `TANK_FULL_RAW`: record the tank probe's raw analog output at known empty and full tank levels. Replace the example calibration values before relying on tank readings. The firmware scales between these calibration points and clamps values outside them to 0–100%; verify the 18% cutoff before connecting the pump.
+- `TANK_EMPTY_DISTANCE_CM` and `TANK_FULL_DISTANCE_CM`: measure from the sensor face to the water surface with the tank empty and full. Set both values in the active firmware sketch; level remains invalid and the pump stays locked until these are configured. The firmware maps the distances to 0–100%; verify the 18% cutoff before connecting the pump.
 - `TANK_LOW_LIMIT_PERCENT`: minimum safe tank percentage before the pump is inhibited.
 
-The tank-level probe must produce a meaningful analog change as water height changes and be designed for the intended water contact. Validate its readings at empty, full, and the 18% pump cutoff before enabling the pump.
+Mount the ultrasonic sensor above the water, pointing down, and use a waterproof model intended for a humid tank environment. Check the sensor's minimum range against your tank depth. Power the module according to its specifications, share ground with the ESP32, and never connect a 5 V ECHO output directly to an ESP32 GPIO; use a voltage divider or logic-level shifter. Validate the distance at empty, full, and the 18% pump cutoff before enabling the pump.
 
 ## Dashboard
 
@@ -89,6 +90,6 @@ Open the Vite URL printed in the terminal. Sensor readings and irrigation status
 
 ## Firebase data contract
 
-- `sensorData`: current `soilMoisture`, `tankLevel`, `temp`, and `humidity` readings.
-- `irrigation/status`: readings, sensor validity flags, pump state, mode, moisture threshold, and Unix-millisecond `updatedAt`.
+- `sensorData`: current `soilMoisture`, `tankLevel`, `tankDistanceCm`, `temp`, and `humidity` readings.
+- `irrigation/status`: readings including `tankDistanceCm`, sensor validity flags, pump state, mode, moisture threshold, and Unix-millisecond `updatedAt`.
 - `irrigation/command`: dashboard writes an `id` and `sentAt` with optional `mode`, `pump`, or `moistureThreshold` fields; the ESP32 applies fresh commands and enforces its local safety checks.

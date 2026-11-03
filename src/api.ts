@@ -3,6 +3,8 @@ export type IrrigationMode = 'auto' | 'manual';
 export interface IrrigationStatus {
   soilPercent: number;
   tankPercent: number;
+  tankDistanceCm?: number | null;
+  /** Legacy field from firmware that used an analog tank probe. */
   tankRaw?: number;
   temperatureC: number | null;
   humidityPercent: number | null;

@@ -27,6 +27,7 @@ function OverviewPage({
   soil,
   soilPercent,
   tank,
+  tankDistanceCm,
   tankRaw,
   temperature,
   humidity,
@@ -59,7 +60,7 @@ function OverviewPage({
           <span className="badge-icon">{connected ? <Check size={16} /> : <CircleAlert size={16} />}</span>
           <span>
             <strong>{connected ? (status?.pumpOn ? 'Watering now' : tankUnavailable ? 'Pump locked' : 'System ready') : 'No connection'}</strong>
-            <small>{connected ? (tankUnavailable ? 'Check tank-level probe' : `Irrigation ${status?.mode ?? 'auto'} mode`) : 'Check device Wi-Fi and Firebase'}</small>
+            <small>{connected ? (tankUnavailable ? 'Check ultrasonic tank sensor and calibration' : `Irrigation ${status?.mode ?? 'auto'} mode`) : 'Check device Wi-Fi and Firebase'}</small>
           </span>
         </div>
       </section>
@@ -78,7 +79,7 @@ function OverviewPage({
           <div className="metric-heading"><span className="metric-icon"><Droplets size={17} /></span><span>WATER RESERVE</span><span className="live-tick" /></div>
           <div className="metric-value">{reading(tank, '%')}</div>
           <div className="metric-foot">
-            <span>{tankLow ? 'Refill soon' : tank === null ? tankRaw === null ? 'Sensor check' : `Raw ADC ${Math.round(tankRaw)}` : 'Tank level'}</span>
+            <span>{tankLow ? 'Refill soon' : tankDistanceCm !== null ? `Distance ${reading(tankDistanceCm, ' cm')}` : tank === null ? tankRaw === null ? 'Sensor check' : `Legacy raw ADC ${Math.round(tankRaw)}` : 'Tank level'}</span>
             <span>{tank === null ? 'Calibrate to unlock' : 'Low at 18%'}</span>
           </div>
           <div className="meter"><span style={{ width: `${tank ?? 0}%` }} /></div>
@@ -168,7 +169,7 @@ function OverviewPage({
           </div>
           {(tankLow || tankUnavailable) && (
             <p className="safety-note">
-              <CircleAlert size={14} /> {tankUnavailable ? 'Pump locked until the tank probe reports a valid level.' : 'Pump locked until the reservoir is refilled.'}
+              <CircleAlert size={14} /> {tankUnavailable ? 'Pump locked until the ultrasonic sensor reports a calibrated level.' : 'Pump locked until the reservoir is refilled.'}
             </p>
           )}
         </article>
