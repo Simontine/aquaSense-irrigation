@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { ArrowRight, Sprout } from 'lucide-react';
-import { logIn, signUp } from './auth';
+import { logIn, signUp } from '../auth';
 
 interface AuthScreenProps {
   onAuthenticated: (email: string) => void;
