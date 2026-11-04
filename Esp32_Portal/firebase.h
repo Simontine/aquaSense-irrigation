@@ -6,7 +6,7 @@
 #endif
 
 #ifndef FIREBASE_DATABASE_URL
-#define FIREBASE_DATABASE_URL "https://irrigation-system-ffb92-default-rtdb.firebaseio.com"
+#define FIREBASE_DATABASE_URL "https://aquasense-68876-default-rtdb.firebaseio.com"
 #endif
 
 #ifndef FIREBASE_AUTH_TOKEN

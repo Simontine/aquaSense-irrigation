@@ -33,7 +33,7 @@ export interface IrrigationSnapshot {
 }
 
 const viteEnv = (import.meta as ImportMeta & { env: Record<string, string | undefined> }).env;
-const firebaseDatabaseUrl = (viteEnv.VITE_FIREBASE_DATABASE_URL ?? 'https://irrigation-system-ffb92-default-rtdb.firebaseio.com').replace(/\/$/, '');
+const firebaseDatabaseUrl = (viteEnv.VITE_FIREBASE_DATABASE_URL ?? 'https://aquasense-68876-default-rtdb.firebaseio.com').replace(/\/$/, '');
 const firebaseAuthToken = viteEnv.VITE_FIREBASE_AUTH_TOKEN;
 
 async function firebaseRequest<T>(path: string, init?: RequestInit): Promise<T> {
